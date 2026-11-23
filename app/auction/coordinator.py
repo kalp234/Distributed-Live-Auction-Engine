@@ -153,6 +153,7 @@ class TwoPhaseCommit:
             if not await self._cas(txn_id, "PREPARED", ("INIT",)):
                 raise AppError(503, "aborted_by_recovery", "transaction was aborted by the recovery process")
             await faults.maybe_crash("crash_before_decision")
+            await faults.maybe_delay("delay_before_decision")
             # ---- decision: the commit point ----------------------------------------------
             if not await self._cas(txn_id, "COMMITTED", ("INIT", "PREPARED")):
                 raise AppError(503, "aborted_by_recovery", "transaction was aborted by the recovery process")

@@ -6,6 +6,7 @@ Injection points in the 2PC coordinator [T4][T5]:
   crash_before_decision both shards PREPARED, process dies (kill -9)      -> recovery ABORTS
   crash_after_decision  COMMITTED logged, process dies before phase 2      -> recovery COMMITS
   lose_b_in_phase2      phase 2 cannot reach Shard B (it stays prepared)   -> resolver COMMITS it
+  delay_before_decision sleep `arg` seconds after PREPARED, before the COMMIT decision (CAS race tests)
   delay_before_phase2   sleep `arg` seconds between decision and phase 2   (observe in-doubt state)
 """
 from __future__ import annotations
@@ -16,7 +17,8 @@ import os
 from typing import Any
 
 log = logging.getLogger("faults")
-KNOWN = {"vote_no_b", "crash_before_decision", "crash_after_decision", "lose_b_in_phase2", "delay_before_phase2"}
+KNOWN = {"vote_no_b", "crash_before_decision", "crash_after_decision", "lose_b_in_phase2",
+         "delay_before_decision", "delay_before_phase2"}
 _armed: dict[str, dict[str, Any]] = {}
 
 
