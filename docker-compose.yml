@@ -1,0 +1,239 @@
+name: auction
+
+# ---------------------------------------------------------------------------
+# Shared fragments
+# ---------------------------------------------------------------------------
+x-pg-common: &pg-common
+  image: auction/patroni:16
+  pull_policy: never
+  restart: unless-stopped
+  stop_grace_period: 20s
+  depends_on:
+    etcd:
+      condition: service_healthy
+  volumes:
+    - ./infra/sql:/sql:ro
+  healthcheck:
+    test: ["CMD", "curl", "-fs", "http://localhost:8008/health"]
+    interval: 2s
+    timeout: 2s
+    retries: 30
+    start_period: 20s
+
+x-pg-env: &pg-env
+  PATRONI_SUPERUSER_USERNAME: postgres
+  PATRONI_SUPERUSER_PASSWORD: postgres_pw
+  PATRONI_REPLICATION_USERNAME: replicator
+  PATRONI_REPLICATION_PASSWORD: replicator_pw
+  APP_DB_USER: auction_app
+  APP_DB_PASSWORD: auction_pw
+
+x-app-common: &app-common
+  image: auction/app:latest
+  pull_policy: never
+  restart: unless-stopped
+  depends_on:
+    pg-a1: {condition: service_started}
+    pg-a2: {condition: service_started}
+    pg-a3: {condition: service_started}
+    pg-b1: {condition: service_started}
+    pg-b2: {condition: service_started}
+    redis: {condition: service_started}
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=2).status==200 else 1)"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+
+x-app-env: &app-env
+  DB_USER: auction_app
+  DB_PASSWORD: auction_pw
+  DB_A_NAME: auction
+  DB_B_NAME: wallet
+  PATRONI_A: http://pg-a1:8008,http://pg-a2:8008,http://pg-a3:8008
+  PATRONI_B: http://pg-b1:8008,http://pg-b2:8008
+  REDIS_URL: redis://redis:6379/0
+
+services:
+  # -------------------------------------------------------------------------
+  # Consensus store for Patroni leader election [T3]
+  # -------------------------------------------------------------------------
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    restart: unless-stopped
+    command:
+      - etcd
+      - --name=etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd=http://etcd:2380
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # -------------------------------------------------------------------------
+  # Shard A — Auction DB: 1 primary + 1 sync replica + 1 async replica [T1]
+  # synchronous_commit=remote_apply: reads on the sync replica are never stale.
+  # -------------------------------------------------------------------------
+  pg-a1:
+    <<: *pg-common
+    build: ./infra/patroni     # image built once, reused by every pg-* service
+    hostname: pg-a1
+    environment: &pg-a-env
+      <<: *pg-env
+      PATRONI_SCOPE: auction
+      PATRONI_NAME: pg-a1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg-a1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg-a1:5432
+      SHARD_DB: auction
+      SYNC_COMMIT: remote_apply
+    ports: ["15441:5432", "18011:8008"]
+    volumes:
+      - ./infra/sql:/sql:ro
+      - pg-a1-data:/data
+      - wal-archive-a:/wal_archive
+      - backups:/backups
+  pg-a2:
+    <<: *pg-common
+    hostname: pg-a2
+    environment:
+      <<: *pg-a-env
+      PATRONI_NAME: pg-a2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg-a2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg-a2:5432
+    ports: ["15442:5432", "18012:8008"]
+    volumes:
+      - ./infra/sql:/sql:ro
+      - pg-a2-data:/data
+      - wal-archive-a:/wal_archive
+      - backups:/backups
+  pg-a3:
+    <<: *pg-common
+    hostname: pg-a3
+    environment:
+      <<: *pg-a-env
+      PATRONI_NAME: pg-a3
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg-a3:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg-a3:5432
+    ports: ["15443:5432", "18013:8008"]
+    volumes:
+      - ./infra/sql:/sql:ro
+      - pg-a3-data:/data
+      - wal-archive-a:/wal_archive
+      - backups:/backups
+
+  # -------------------------------------------------------------------------
+  # Shard B — Wallet DB: primary + sync replica (separate DB server) [T4]
+  # -------------------------------------------------------------------------
+  pg-b1:
+    <<: *pg-common
+    hostname: pg-b1
+    environment: &pg-b-env
+      <<: *pg-env
+      PATRONI_SCOPE: wallet
+      PATRONI_NAME: pg-b1
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg-b1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg-b1:5432
+      SHARD_DB: wallet
+      SYNC_COMMIT: "on"
+    ports: ["15451:5432", "18021:8008"]
+    volumes:
+      - ./infra/sql:/sql:ro
+      - pg-b1-data:/data
+      - wal-archive-b:/wal_archive
+      - backups:/backups
+  pg-b2:
+    <<: *pg-common
+    hostname: pg-b2
+    environment:
+      <<: *pg-b-env
+      PATRONI_NAME: pg-b2
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg-b2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg-b2:5432
+    ports: ["15452:5432", "18022:8008"]
+    volumes:
+      - ./infra/sql:/sql:ro
+      - pg-b2-data:/data
+      - wal-archive-b:/wal_archive
+      - backups:/backups
+
+  # -------------------------------------------------------------------------
+  # Redis: cross-node pub/sub fan-out of live bid events [T6]
+  # -------------------------------------------------------------------------
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["16380:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  # -------------------------------------------------------------------------
+  # Stateless app nodes [T6]
+  # -------------------------------------------------------------------------
+  app1:
+    <<: *app-common
+    build: ./app               # image built once, reused by app2/app3
+    hostname: app1
+    environment: {<<: *app-env, NODE_ID: app1}
+    ports: ["18001:8000"]
+  app2:
+    <<: *app-common
+    hostname: app2
+    environment: {<<: *app-env, NODE_ID: app2}
+    ports: ["18002:8000"]
+  app3:
+    <<: *app-common
+    hostname: app3
+    environment: {<<: *app-env, NODE_ID: app3}
+    ports: ["18003:8000"]
+
+  # -------------------------------------------------------------------------
+  # HAProxy: HTTP + WebSocket load balancer with health checks [T6]
+  # -------------------------------------------------------------------------
+  haproxy:
+    image: haproxy:2.9-alpine
+    restart: unless-stopped
+    depends_on: [app1, app2, app3]
+    volumes:
+      - ./infra/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports: ["18080:80", "18404:8404"]
+
+  # -------------------------------------------------------------------------
+  # Demo / chaos / test runner (not started by `up`; used via `make demo-*`)
+  # -------------------------------------------------------------------------
+  tools:
+    build: ./tools
+    image: auction/tools:latest
+    profiles: ["tools"]
+    working_dir: /work
+    environment:
+      <<: *app-env
+      LB_URL: http://haproxy:80
+      PG_SUPERUSER_PASSWORD: postgres_pw
+    volumes:
+      - .:/work
+      - /var/run/docker.sock:/var/run/docker.sock
+      - backups:/backups
+      - wal-archive-a:/wal_archive_a:ro
+
+volumes:
+  etcd-data:
+  pg-a1-data:
+  pg-a2-data:
+  pg-a3-data:
+  pg-b1-data:
+  pg-b2-data:
+  wal-archive-a:
+  wal-archive-b:
+  backups:
