@@ -1,0 +1,99 @@
+$ make demo-fault
+
+═══════════════════════════════════════════════════════════════════════════════════
+  DEMO [T2] Fault tolerance — kill an app node, a DB replica and Redis under load
+═══════════════════════════════════════════════════════════════════════════════════
+  auction #13 ends in 14 s; user 3 leads with $42 (200)
+  load: 6 readers + 3 bidders on item #14; 6 WebSocket watchers on Counter({'app3': 2, 'app1': 2, 'app2': 2})
+
+▶ Phase 0 — steady state
+  t=  0s  ok=307  rej=50  fail=0   bids=53  │ nodes: app1=126 app2=118 app3=113 │ reads: pg-a1=129 pg-a3=125 │ writes: pg-a2=53
+  t=  1s  ok=306  rej=48  fail=0   bids=56  │ nodes: app1=120 app2=116 app3=118 │ reads: pg-a1=124 pg-a3=126 │ writes: pg-a2=56
+  t=  2s  ok=309  rej=49  fail=0   bids=57  │ nodes: app1=113 app2=120 app3=125 │ reads: pg-a1=125 pg-a3=127 │ writes: pg-a2=57
+  t=  3s  ok=308  rej=44  fail=0   bids=56  │ nodes: app1=119 app2=117 app3=116 │ reads: pg-a1=125 pg-a3=127 │ writes: pg-a2=56
+
+▶ Phase 1 — kill app2 (SIGKILL, mid-auction)
+  t=  4s  ok=88   rej=14  fail=0   bids=16  │ nodes: app1=49 app2=1 app3=52 │ reads: pg-a1=38 pg-a3=34 │ writes: pg-a2=16  app2 dead
+  t=  5s  ok=308  rej=49  fail=0   bids=56  │ nodes: app1=177 app3=180 │ reads: pg-a1=119 pg-a3=133 │ writes: pg-a2=56  app2 dead
+  t=  6s  ok=307  rej=50  fail=0   bids=55  │ nodes: app1=180 app3=177 │ reads: pg-a1=128 pg-a3=124 │ writes: pg-a2=55  app2 dead
+  t=  7s  ok=299  rej=47  fail=0   bids=51  │ nodes: app1=172 app3=174 │ reads: pg-a1=122 pg-a3=126 │ writes: pg-a2=51  app2 dead
+  t=  8s  ok=291  rej=48  fail=0   bids=45  │ nodes: app1=172 app3=167 │ reads: pg-a1=120 pg-a3=126 │ writes: pg-a2=45  app2 dead
+  t=  9s  ok=307  rej=50  fail=0   bids=55  │ nodes: app1=178 app3=179 │ reads: pg-a1=118 pg-a3=134 │ writes: pg-a2=55  app2 dead
+
+▶ Phase 2 — kill a Shard A replica: the SYNC standby pg-a3
+  t= 10s  ok=210  rej=16  fail=0   bids=22  │ nodes: app1=114 app3=112 │ reads: pg-a1=150 pg-a2=4 pg-a3=34 │ writes: pg-a2=22  pg-a3 dead
+  t= 11s  ok=299  rej=55  fail=0   bids=49  │ nodes: app1=176 app3=178 │ reads: pg-a1=250 │ writes: pg-a2=49  pg-a3 dead
+  t= 12s  ok=296  rej=52  fail=0   bids=50  │ nodes: app1=173 app3=175 │ reads: pg-a1=242 pg-a2=4 │ writes: pg-a2=50  pg-a3 dead
+  t= 13s  ok=287  rej=49  fail=0   bids=53  │ nodes: app1=167 app3=169 │ reads: pg-a1=234 │ writes: pg-a2=53  pg-a3 dead
+  t= 14s  ok=310  rej=47  fail=0   bids=58  │ nodes: app1=178 app3=179 │ reads: pg-a1=252 │ writes: pg-a2=58  pg-a3 dead
+  t= 15s  ok=307  rej=55  fail=0   bids=55  │ nodes: app1=180 app3=182 │ reads: pg-a1=252 │ writes: pg-a2=55  pg-a3 dead
+  t= 16s  ok=309  rej=49  fail=0   bids=57  │ nodes: app1=184 app3=174 │ reads: pg-a1=252 │ writes: pg-a2=57  pg-a3 dead
+  t= 17s  ok=304  rej=53  fail=0   bids=52  │ nodes: app1=179 app3=178 │ reads: pg-a1=252 │ writes: pg-a2=52  pg-a3 dead
+  pg-a1  sync_standby  streaming  TL=1  lag=0
+  pg-a2  leader        running    TL=1  lag=
+  write stall while Patroni re-assigned the sync standby: 0 s with 0 commits (remote_apply commits wait for the sync replica — the price of zero-loss replication)
+  ✔ Patroni made pg-a1 the new sync standby
+
+▶ Phase 3 — kill Redis
+  t= 18s  ok=256  rej=44  fail=0   bids=46  │ nodes: app1=155 app3=145 │ reads: pg-a1=210 │ writes: pg-a2=46  redis dead
+  t= 19s  ok=315  rej=48  fail=0   bids=57  │ nodes: app1=185 app3=178 │ reads: pg-a1=258 │ writes: pg-a2=57  redis dead
+  t= 20s  ok=305  rej=49  fail=0   bids=59  │ nodes: app1=177 app3=177 │ reads: pg-a1=246 │ writes: pg-a2=59  redis dead
+  t= 21s  ok=287  rej=52  fail=0   bids=47  │ nodes: app1=172 app3=167 │ reads: pg-a1=240 │ writes: pg-a2=47  redis dead
+  t= 22s  ok=309  rej=50  fail=0   bids=57  │ nodes: app1=179 app3=180 │ reads: pg-a1=252 │ writes: pg-a2=57  redis dead
+  t= 23s  ok=304  rej=53  fail=0   bids=52  │ nodes: app1=178 app3=179 │ reads: pg-a1=252 │ writes: pg-a2=52  redis dead
+  GET /api/live while Redis is down → source=db (13 open items)
+  ✔ live board falls back to the database
+
+▶ Phase 4 — restore Redis, app2 and the replica
+  t= 24s  ok=208  rej=27  fail=0   bids=36  │ nodes: app1=114 app3=121 │ reads: pg-a1=172 │ writes: pg-a2=36  restored
+  t= 25s  ok=309  rej=46  fail=0   bids=57  │ nodes: app1=176 app3=179 │ reads: pg-a1=252 │ writes: pg-a2=57  restored
+  t= 26s  ok=316  rej=40  fail=0   bids=59  │ nodes: app1=136 app2=85 app3=135 │ reads: pg-a1=194 pg-a3=63 │ writes: pg-a2=59  restored
+  t= 27s  ok=302  rej=51  fail=0   bids=52  │ nodes: app1=121 app2=114 app3=118 │ reads: pg-a1=125 pg-a3=125 │ writes: pg-a2=52  restored
+  t= 28s  ok=314  rej=47  fail=0   bids=60  │ nodes: app1=122 app2=117 app3=122 │ reads: pg-a1=129 pg-a3=125 │ writes: pg-a2=60  restored
+  t= 29s  ok=311  rej=48  fail=0   bids=59  │ nodes: app1=111 app2=120 app3=128 │ reads: pg-a1=125 pg-a3=127 │ writes: pg-a2=59  restored
+  GET /api/live after Redis restart → source=redis (13 open items rebuilt from DB)
+  ✔ Redis live board rebuilt from the database
+
+▶ Per-phase results
+  steady          ok=1318  rejected=205  failed=0   committed bids=238 
+  app2 killed     ok=1722  rejected=260  failed=0   committed bids=284 
+  replica killed  ok=2368  rejected=404  failed=0   committed bids=420 
+  redis killed    ok=1728  rejected=279  failed=0   committed bids=308 
+  restore         ok=1625  rejected=243  failed=0   committed bids=300 
+  total: ok=8761 rejected=1391 failed=0 committed bids=1550 client retries=0
+  ✔ bidding and reads continued through every failure (failed 0 of 10152)
+
+▶ No committed bid lost
+  bids confirmed to clients: 1550   stored on primary: 1550
+  ✔ every confirmed bid is on the primary (missing: 0)
+  ✔ …and on replica pg-a1 (sync_standby): 1550 bids
+  ✔ …and on replica pg-a3 (replica): 1550 bids
+
+▶ Auction that ended during the chaos
+  auction #13: status=sold winner=user 3 price=$42.00
+  ✔ closed and settled exactly once by the closer leader
+
+▶ Live updates (WebSocket watchers)
+  reconnects=2  hello nodes=Counter({'app3': 3, 'app1': 3, 'app2': 2})  mode messages={'push': 14, 'polling': 6}  bid events received=8130
+  ✔ the 2 client(s) of the killed app2 reconnected to other nodes: [['app2', 'app1'], ['app2', 'app3']]
+  ✔ clients told to poll while Redis was down, back to push after
+  ✔ live bid events kept flowing
+  ✔ app2 running again
+  ✔ pg-a3 running again
+  ✔ redis running again
+
+▶ Invariants
+  Σ balance = $10000.00   Σ held = $400.80   Σ active holds = $400.80   wallets=10 items=14 bids=2470 holds=2470 txns=4427
+  ✔ M1 money conserved: Σ balance 10000.00 == supply 10000.00
+  ✔ M2 0 ≤ held ≤ balance for all wallets 
+  ✔ M3 held == Σ active holds per wallet 
+  ✔ M4 at most one active hold per item
+  ✔ X1 open items: one active hold = highest bid 
+  ✔ X2 items without bids hold no money 
+  ✔ X3 sold items: winner's hold settled to seller 
+  ✔ X4 every bid/hold comes from a COMMITTED 2PC txn 
+  ✔ A1 current_price/highest_bidder match the max bid 
+  ✔ A2 exactly one bid at the winning price per item 
+  ✔ T1 no in-doubt txns: prepared A=0 B=0, txn_log incomplete=0
+
+ALL CHECKS PASSED

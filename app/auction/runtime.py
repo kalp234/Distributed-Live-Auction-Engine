@@ -13,6 +13,7 @@ class Runtime:
     shard_a: "ShardTopology"
     shard_b: "ShardTopology"
     hub: "Hub"
+    closer: Any = None
     tasks: list[asyncio.Task[Any]] = []
 
 

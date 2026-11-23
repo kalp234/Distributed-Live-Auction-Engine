@@ -7,8 +7,8 @@
    date; commits don't wait for the async one.
 4. Read-your-writes: reads without a session token can hit the stale replica; reads with
    X-Min-LSN never do (they fall back to an up-to-date node).
-5. The price of sync replication: delay apply on the SYNC replica by 2 s -> every commit
-   waits those 2 s.
+5. The price of sync replication: delay apply on the SYNC replica by 500 ms -> every
+   synchronous commit waits; one 2PC bid makes ~6 of them on Shard A, so the cost compounds.
 (WAL replay *pause* can't be used: Patroni auto-resumes paused replay within loop_wait.)
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ from collections import Counter
 
 import httpx
 
-from demo.common import (LB_URL, Checks, banner, bold, cyan, dim, green, info, patroni_cluster,
+from demo.common import (wait_cluster_ready, LB_URL, Checks, banner, bold, cyan, dim, green, info, patroni_cluster,
                          print_cluster, psql, red, set_apply_delay, step, yellow)
 from demo.db import connect
 
@@ -73,9 +73,10 @@ def bid(http: httpx.Client, item: int, user: int, amount: float) -> tuple[httpx.
 async def main() -> None:
     banner("DEMO [T1] Replication")
     c = Checks()
+    wait_cluster_ready()
     primary, sync, asyn = roles()
     labels = {primary: "primary", sync: "sync replica", asyn: "async replica"}
-    http = httpx.Client(base_url=LB_URL, timeout=10)
+    http = httpx.Client(base_url=LB_URL, timeout=30)
 
     step("1. Shard A topology (Patroni) and pg_stat_replication on the primary")
     print_cluster("A")
@@ -139,13 +140,16 @@ async def main() -> None:
     v = await show_nodes(item, labels)
     c.check(len({t for _, t, _ in v.values()}) == 1, "async replica caught up as soon as the delay was removed")
 
-    step(f"5. The cost of synchronous replication — delay apply on the SYNC replica ({sync}) by 2 s")
-    set_apply_delay(sync, "2s")
+    step(f"5. The cost of synchronous replication — delay apply on the SYNC replica ({sync}) by 500 ms")
+    _, base_ms = bid(http, item, 8, 35)
+    set_apply_delay(sync, "500ms")
     try:
         r, ms = bid(http, item, 8, 40)
-        info(f"bid $40 → {r.status_code} after {bold(f'{ms:.0f} ms')} (normally ~3 ms)")
-        c.check(r.status_code == 200 and ms >= 1900,
-                "commit waited until the sync replica had applied it (synchronous_commit=remote_apply)")
+        info(f"bid $40 → {r.status_code} after {bold(f'{ms:.0f} ms')} (vs {base_ms:.0f} ms without the delay) "
+             f"≈ {ms / 500:.0f} synchronous commits on Shard A, each waiting for the sync replica to apply")
+        info(dim("(txn_log INIT, PREPARE TRANSACTION, PREPARED, COMMITTED, COMMIT PREPARED, completed)"))
+        c.check(r.status_code == 200 and ms >= 1500,
+                "every Shard A commit waited until the sync replica had applied it (synchronous_commit=remote_apply)")
     finally:
         set_apply_delay(sync, None)
     info(dim("Trade-off (CAP): sync = no lost commits on failover + fresh reads, paid with write latency and"))

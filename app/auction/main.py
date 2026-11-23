@@ -43,11 +43,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     rt.hub = Hub(settings.node_id, settings.redis_url, board_loader=lambda: db.load_board(rt.shard_a))
     # First discovery before serving so the node is useful immediately.
     await asyncio.gather(rt.shard_a.refresh(), rt.shard_b.refresh(), return_exceptions=True)
+    rt.closer = Closer()
     rt.tasks = [
         asyncio.create_task(rt.shard_a.run(settings.topology_interval)),
         asyncio.create_task(rt.shard_b.run(settings.topology_interval)),
         asyncio.create_task(rt.hub.run()),
-        asyncio.create_task(Closer().run()),
+        asyncio.create_task(rt.closer.run()),
         asyncio.create_task(recovery.run()),  # [T5] startup + periodic in-doubt resolution
     ]
     log.info("node %s started; A leader=%s B leader=%s", settings.node_id,

@@ -90,15 +90,17 @@ function render(st) {
   $('shardA').innerHTML = shardTable(A); $('shardB').innerHTML = shardTable(B);
 
   // App nodes
-  let h = '<table><tr><th>node</th><th>LB</th><th>ready</th><th>writes</th><th>live</th><th>ws</th><th>req/s</th></tr>';
+  let h = '<table><tr><th>node</th><th>LB</th><th>ready</th><th>writes</th><th>live</th><th>ws</th><th>req/s</th><th title="2PC committed / aborted by this coordinator">2PC ✔/✘</th><th>breakers</th></tr>';
   for (const n of NODES) {
     const a = st.apps[n] || {}, hp = (st.haproxy || {})[n] || {};
     const lb = hp.status || '?';
-    h += `<tr><td><span class="dot" style="background:${COLORS[n]}"></span><b>${n}</b></td>
+    h += `<tr><td><span class="dot" style="background:${COLORS[n]}"></span><b>${n}</b>${a.closer ? ' <span class="pill muted" title="auction-closer leader (advisory lock)">closer</span>' : ''}</td>
       <td><span class="pill ${lb.startsWith('UP') ? 'ok' : 'bad'}">${esc(lb)}</span></td>
       <td class="${a.ready ? 'ok' : 'bad'}">${a.up ? (a.ready ? 'yes' : 'no') : 'down'}</td>
       <td class="${a.writes ? 'ok' : 'warn'}">${a.up ? (a.writes ? 'yes' : 'no primary') : ''}</td>
-      <td class="${a.realtime === 'push' ? 'ok' : 'warn'}">${a.realtime || ''}</td><td>${a.ws_clients ?? ''}</td><td>${hp.rps ?? ''}</td></tr>`;
+      <td class="${a.realtime === 'push' ? 'ok' : 'warn'}">${a.realtime || ''}</td><td>${a.ws_clients ?? ''}</td><td>${hp.rps ?? ''}</td>
+      <td>${a.two_pc ? a.two_pc.committed + ' / ' + a.two_pc.aborted : ''}</td>
+      <td class="${(a.open_breakers || []).length ? 'bad' : 'muted'}">${(a.open_breakers || []).length ? esc(a.open_breakers.join(' ')) + ' open' : (a.up ? 'closed' : '')}</td></tr>`;
   }
   $('apps').innerHTML = h + '</table>';
 
@@ -141,6 +143,7 @@ function render(st) {
       case 'primary_change': txt = `SHARD ${e.shard} PRIMARY: ${e.old ?? '–'} → ${e.new ?? 'NONE'}`; cls = e.new ? 'warn' : 'bad'; break;
       case 'lb_status': txt = `HAProxy: ${e.node} ${e.old} → ${e.new}`; cls = e.new.startsWith('UP') ? 'ok' : 'bad'; break;
       case 'redis': txt = `redis ${e.status}`; cls = e.status === 'up' ? 'ok' : 'bad'; break;
+      case 'recovery': txt = `resolver: ` + e.actions.map(a => `${a.decision} PREPARED ${a.txn_id.slice(0, 8)} on ${a.shard}`).join(', ') + ` (${e.node})`; cls = 'warn'; break;
       default: txt = JSON.stringify(e); cls = 'muted';
     }
     return `<div class="${cls}">${t}  ${esc(txt)}</div>`;

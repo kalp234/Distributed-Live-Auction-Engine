@@ -1,0 +1,60 @@
+$ make demo-lb
+
+════════════════════════════
+  DEMO [T6] Load balancing
+════════════════════════════
+
+▶ HAProxy backend status
+  app1=UP  app2=UP  app3=UP
+
+▶ Phase 1 — steady load (6 readers + 2 bidders on item #8) for 6 s
+  t=  0s  ok=301  rej=25  fail=0   bids=43  │ nodes: app1=112 app2=112 app3=102 │ reads: pg-a1=129 pg-a3=129 │ writes: pg-a2=43
+  t=  1s  ok=299  rej=25  fail=0   bids=47  │ nodes: app1=110 app2=102 app3=112 │ reads: pg-a1=127 pg-a3=125 │ writes: pg-a2=47
+  t=  2s  ok=290  rej=22  fail=0   bids=44  │ nodes: app1=108 app2=104 app3=100 │ reads: pg-a1=127 pg-a3=119 │ writes: pg-a2=44
+  t=  3s  ok=305  rej=19  fail=0   bids=55  │ nodes: app1=106 app2=107 app3=111 │ reads: pg-a1=128 pg-a3=122 │ writes: pg-a2=55
+  t=  4s  ok=286  rej=20  fail=0   bids=45  │ nodes: app1=99 app2=105 app3=102 │ reads: pg-a1=116 pg-a3=125 │ writes: pg-a2=45
+  t=  5s  ok=294  rej=26  fail=0   bids=42  │ nodes: app1=110 app2=101 app3=109 │ reads: pg-a1=127 pg-a3=125 │ writes: pg-a2=42
+  app nodes: app1=645 app2=631 app3=636
+  reads by DB node: pg-a1=754 pg-a3=745   writes by DB node: pg-a2=276
+  ✔ HTTP load spread evenly (each node 25–42 %)
+  ✔ all writes went to one DB node (the primary): ['pg-a2']
+  ✔ reads served by replicas only (read/write splitting)
+
+▶ Phase 2 — kill app2 (docker kill, SIGKILL)
+  t=  6s  ok=105  rej=9   fail=0   bids=15  │ nodes: app1=56 app2=2 app3=56 │ reads: pg-a1=47 pg-a3=43 │ writes: pg-a2=15  app2 killed
+  t=  7s  ok=299  rej=19  fail=0   bids=53  │ nodes: app1=159 app3=159 │ reads: pg-a1=121 pg-a3=125 │ writes: pg-a2=53  app2 killed
+  t=  8s  ok=289  rej=18  fail=0   bids=44  │ nodes: app1=155 app3=152 │ reads: pg-a1=120 pg-a3=125 │ writes: pg-a2=44  app2 killed
+  t=  9s  ok=300  rej=24  fail=0   bids=48  │ nodes: app1=162 app3=162 │ reads: pg-a1=124 pg-a3=128 │ writes: pg-a2=48  app2 killed
+  t= 10s  ok=291  rej=23  fail=0   bids=45  │ nodes: app1=156 app3=158 │ reads: pg-a1=126 pg-a3=120 │ writes: pg-a2=45  app2 killed
+  t= 11s  ok=296  rej=22  fail=0   bids=50  │ nodes: app1=162 app3=156 │ reads: pg-a1=125 pg-a3=121 │ writes: pg-a2=50  app2 killed
+  t= 12s  ok=291  rej=25  fail=0   bids=45  │ nodes: app1=156 app3=160 │ reads: pg-a1=118 pg-a3=128 │ writes: pg-a2=45  app2 killed
+  HAProxy marked app2 DOWN 0.7s after the kill  (app1=UP  app2=DOWN  app3=UP)
+  app nodes after removal: app1=636 app3=636
+  ✔ traffic redistributed to app1 + app3
+  ✔ failed requests while app2 died: 0 
+
+▶ Phase 3 — restart app2
+  HAProxy re-added app2 after 2.1s  (app1=UP  app2=UP  app3=UP)
+  t= 13s  ok=275  rej=21  fail=0   bids=42  │ nodes: app1=143 app3=153 │ reads: pg-a1=115 pg-a3=118 │ writes: pg-a2=42  app2 back
+  t= 14s  ok=294  rej=22  fail=0   bids=48  │ nodes: app1=158 app3=158 │ reads: pg-a1=121 pg-a3=125 │ writes: pg-a2=48  app2 back
+  t= 15s  ok=288  rej=26  fail=0   bids=42  │ nodes: app1=110 app2=87 app3=117 │ reads: pg-a1=121 pg-a3=125 │ writes: pg-a2=42  app2 back
+  t= 16s  ok=296  rej=24  fail=0   bids=44  │ nodes: app1=110 app2=105 app3=105 │ reads: pg-a1=125 pg-a3=127 │ writes: pg-a2=44  app2 back
+  t= 17s  ok=299  rej=23  fail=0   bids=47  │ nodes: app1=102 app2=108 app3=112 │ reads: pg-a1=126 pg-a3=126 │ writes: pg-a2=47  app2 back
+  t= 18s  ok=291  rej=25  fail=0   bids=45  │ nodes: app1=107 app2=108 app3=101 │ reads: pg-a1=124 pg-a3=122 │ writes: pg-a2=45  app2 back
+  t= 19s  ok=294  rej=24  fail=0   bids=48  │ nodes: app1=104 app2=107 app3=107 │ reads: pg-a1=124 pg-a3=122 │ writes: pg-a2=48  app2 back
+  app nodes after re-add: app1=423 app2=428 app3=425
+  ✔ app2 receives traffic again
+  total: ok=5711 rejected=444 failed=0 accepted bids=896 retries=0
+
+▶ WebSockets through HAProxy + cross-node fan-out
+  6 WebSocket clients via HAProxy landed on: app3, app1, app2, app3, app1, app2
+  ✔ WebSocket connections are spread over all 3 nodes
+  bids placed: $11 via app1, $12 via app2, $13 via app3
+  ✔ client on app3 saw all 3 bids: $11←app1, $12←app2, $13←app3
+  ✔ client on app1 saw all 3 bids: $11←app1, $12←app2, $13←app3
+  ✔ client on app2 saw all 3 bids: $11←app1, $12←app2, $13←app3
+  ✔ client on app3 saw all 3 bids: $11←app1, $12←app2, $13←app3
+  ✔ client on app1 saw all 3 bids: $11←app1, $12←app2, $13←app3
+  ✔ client on app2 saw all 3 bids: $11←app1, $12←app2, $13←app3
+
+ALL CHECKS PASSED

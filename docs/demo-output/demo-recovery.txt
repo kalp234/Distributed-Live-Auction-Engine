@@ -1,0 +1,104 @@
+$ make demo-recovery
+
+══════════════════════════════════════════════════════════════════════
+  DEMO [T5] Recovery — coordinator crash, DB crash, PITR, Redis loss
+══════════════════════════════════════════════════════════════════════
+
+▶ 1a. kill -9 of the coordinator AFTER both PREPAREs, BEFORE the decision
+  client: request to app3 failed (RemoteProtocolError) — the coordinator process died
+  immediately after: txn e50c68d3 log=PREPARED; prepared on A=1 B=1
+  ✔ in doubt: both shards hold a prepared txn, no decision logged
+    app3 recovery WARNING resolved in-doubt e50c68d3-c6f9-480e-a1a7-4f91d05a1737 on shard A -> ROLLBACK PREPARED (log=ABORTED, age 0.8s)
+    app3 recovery WARNING resolved in-doubt e50c68d3-c6f9-480e-a1a7-4f91d05a1737 on shard B -> ROLLBACK PREPARED (log=ABORTED, age 0.8s)
+    app3 recovery INFO startup recovery pass done: 2 in-doubt participant txn(s) resolved
+  app3 back after 0.8s → log=ABORTED; prepared A=0 B=0; item price=$20.00 top=user 3 bids=1
+  ✔ presumed abort: ROLLBACK PREPARED on both shards
+
+▶ 1b. kill -9 of the coordinator AFTER logging COMMITTED, BEFORE phase 2
+  client: request to app3 failed (RemoteProtocolError) — no response, outcome unknown to the client
+  immediately after: txn e613a2d6 log=COMMITTED; prepared on A=1 B=1
+  ✔ decision durable (COMMITTED) but phase 2 never ran
+    app3 recovery WARNING resolved in-doubt e613a2d6-4f5f-4784-9f97-116d9853a4ff on shard A -> COMMIT PREPARED (log=COMMITTED, age 0.8s)
+    app3 recovery WARNING resolved in-doubt e613a2d6-4f5f-4784-9f97-116d9853a4ff on shard B -> COMMIT PREPARED (log=COMMITTED, age 0.8s)
+  after restart: prepared A=0 B=0; item price=$40.00 top=user 5 bids=2
+  client retries the same request via HAProxy → 200 status=duplicate (served by app2)
+  ✔ recovery COMMITTED both shards; retry is exactly-once
+
+▶ 1c. SIGKILL app3 from outside mid-phase-2 (it stays down) → another node recovers
+  app3 SIGKILLed; txn 5b1362ef log=COMMITTED; prepared A=1 B=1
+  2PC blocking problem: the prepared txn holds the item's row lock — a new bid has to wait:
+  bid $60 via app1 → 200 accepted after waiting 4.8s
+    app1 recovery WARNING resolved in-doubt 5b1362ef-1069-49a9-aec1-8910babcabe7 on shard A -> COMMIT PREPARED (log=COMMITTED, age 6.0s)
+    app1 recovery WARNING resolved in-doubt 5b1362ef-1069-49a9-aec1-8910babcabe7 on shard B -> COMMIT PREPARED (log=COMMITTED, age 6.0s)
+  ✔ blocked until a surviving node's resolver COMMITTED the orphan, then the new bid went through
+  item price=$60.00 top=user 7 bids=4
+
+▶ 2. DB crash recovery — kill -9 every PostgreSQL process on the Shard A primary (pg-a1) under load
+  t=  0s  ok=259  rej=71  fail=0   bids=96  │ nodes: app1=151 app2=156 app3=23 │ reads: pg-a2=77 pg-a3=86 │ writes: pg-a1=96
+  t=  1s  ok=247  rej=74  fail=0   bids=89  │ nodes: app1=107 app2=105 app3=109 │ reads: pg-a2=84 pg-a3=74 │ writes: pg-a1=89
+  t=  2s  ok=259  rej=67  fail=0   bids=99  │ nodes: app1=108 app2=109 app3=109 │ reads: pg-a2=82 pg-a3=78 │ writes: pg-a1=99
+  SIGKILL sent to all postgres processes on pg-a1 at WAL 0/80FF910 (Patroni itself keeps running)
+  t=  3s  ok=129  rej=1   fail=3   bids=1   │ nodes: app1=42 app2=46 app3=42 │ reads: pg-a2=64 pg-a3=64 │ writes: pg-a1=1  postgres killed
+  t=  4s  ok=148  rej=0   fail=3   bids=0   │ nodes: app1=50 app2=48 app3=50 │ reads: pg-a2=74 pg-a3=74 │ writes: -  postgres killed
+  t=  5s  ok=142  rej=0   fail=3   bids=0   │ nodes: app1=48 app2=47 app3=47 │ reads: pg-a2=70 pg-a3=72 │ writes: -  postgres killed
+  t=  6s  ok=172  rej=44  fail=0   bids=22  │ nodes: app1=73 app2=72 app3=71 │ reads: pg-a2=80 pg-a3=70 │ writes: pg-a1=22  postgres killed
+  t=  7s  ok=225  rej=106 fail=0   bids=69  │ nodes: app1=115 app2=111 app3=105 │ reads: pg-a1=44 pg-a2=55 pg-a3=57 │ writes: pg-a1=69  postgres killed
+  t=  8s  ok=253  rej=82  fail=0   bids=93  │ nodes: app1=106 app2=117 app3=112 │ reads: pg-a1=103 pg-a2=30 pg-a3=27 │ writes: pg-a1=93  postgres killed
+  t=  9s  ok=245  rej=78  fail=0   bids=87  │ nodes: app1=111 app2=104 app3=108 │ reads: pg-a2=73 pg-a3=85 │ writes: pg-a1=87  postgres killed
+  t= 10s  ok=256  rej=76  fail=0   bids=96  │ nodes: app1=108 app2=109 app3=115 │ reads: pg-a2=82 pg-a3=78 │ writes: pg-a1=96  postgres killed
+  t= 11s  ok=261  rej=75  fail=0   bids=99  │ nodes: app1=106 app2=123 app3=107 │ reads: pg-a2=81 pg-a3=81 │ writes: pg-a1=99  postgres killed
+  t= 12s  ok=253  rej=78  fail=0   bids=91  │ nodes: app1=107 app2=113 app3=111 │ reads: pg-a2=85 pg-a3=77 │ writes: pg-a1=91  postgres killed
+  t= 13s  ok=247  rej=81  fail=0   bids=87  │ nodes: app1=106 app2=114 app3=108 │ reads: pg-a2=80 pg-a3=80 │ writes: pg-a1=87  postgres killed
+  t= 14s  ok=257  rej=77  fail=0   bids=95  │ nodes: app1=104 app2=119 app3=111 │ reads: pg-a2=75 pg-a3=87 │ writes: pg-a1=95  postgres killed
+    2026-11-23 19:01:52.472 UTC [1705] LOG:  database system was interrupted; last known up at 2026-11-23 19:00:49 UTC
+    2026-11-23 19:01:52.506 UTC [1705] LOG:  database system was not properly shut down; automatic recovery in progress
+    2026-11-23 19:01:52.508 UTC [1705] LOG:  redo starts at 0/662C688
+    2026-11-23 19:01:52.548 UTC [1705] LOG:  redo done at 0/80FF8E8 system usage: CPU: user: 0.02 s, system: 0.01 s, elapsed: 0.03 s
+    2026-11-23 19:01:52.568 UTC [1701] LOG:  database system is ready to accept connections
+  primary now: pg-a1; confirmed bids=1036 stored=1036; failed requests during the crash=9
+  ✔ WAL replay recovered every committed bid (missing 0)
+
+▶ 3. Point-in-time recovery — base backup + WAL archive
+  base backup /backups/a-20261123-190203 taken from pg-a1 in 0.7s (6.9M)
+  bids before the accident: 7594   recovery target time: 2026-11-23 19:02:05.393768+00:00
+  💥 accident: DELETE FROM bids → DELETE 7594; bids now: 0
+  WAL up to segment 00000002000000000000000A archived to /wal_archive
+
+▶    restore a sandbox instance to the target time
+    sandbox starting point-in-time recovery to 2026-11-23 19:02:05.393768+00
+    sandbox redo starts at 0/9000028
+    sandbox database system is ready to accept read-only connections
+    sandbox recovery stopping before commit of transaction 68499, time 2026-11-23 19:02:06.404542+00
+    sandbox selected new timeline ID: 3
+    sandbox archive recovery complete
+    sandbox database system is ready to accept connections
+  sandbox recovered in 1.3s: 7594 bids as of 2026-11-23 19:02:05.393768+00:00
+  ✔ PITR restored the exact pre-accident state (7594 == 7594)
+
+▶    copy the lost rows back into the live primary
+  COPY 7594; bids on live primary: 7594
+  ✔ live data repaired
+
+▶ 4. Redis loss — the live board is rebuilt from the database
+  before: /api/live source=redis items=17
+  Redis killed: /api/live source=db items=17 (served from DB)
+  Redis restarted EMPTY (no persistence); redis board back with 17 items 2.3s later
+  ✔ rebuilt board == database state
+  ✔ app3 running
+  ✔ redis running
+
+▶ Invariants
+  Σ balance = $10000.00   Σ held = $793.45   Σ active holds = $793.45   wallets=10 items=18 bids=7594 holds=7594 txns=15032
+  ✔ M1 money conserved: Σ balance 10000.00 == supply 10000.00
+  ✔ M2 0 ≤ held ≤ balance for all wallets 
+  ✔ M3 held == Σ active holds per wallet 
+  ✔ M4 at most one active hold per item
+  ✔ X1 open items: one active hold = highest bid 
+  ✔ X2 items without bids hold no money 
+  ✔ X3 sold items: winner's hold settled to seller 
+  ✔ X4 every bid/hold comes from a COMMITTED 2PC txn 
+  ✔ A1 current_price/highest_bidder match the max bid 
+  ✔ A2 exactly one bid at the winning price per item 
+  ✔ T1 no in-doubt txns: prepared A=0 B=0, txn_log incomplete=0
+
+ALL CHECKS PASSED

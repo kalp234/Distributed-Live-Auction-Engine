@@ -125,7 +125,9 @@ class Monitor:
             d = r.json()
             ready = (await self.http.get(f"http://{node}:8000/readyz")).json()
             return {"up": True, "ready": ready["ready"], "writes": ready["writes_available"],
-                    "realtime": d["realtime"]["mode"], "ws_clients": d["realtime"]["ws_clients"]}
+                    "realtime": d["realtime"]["mode"], "ws_clients": d["realtime"]["ws_clients"],
+                    "two_pc": d.get("two_pc", {}), "closer": d.get("closer_leader", False),
+                    "open_breakers": d.get("open_breakers", [])}
         except Exception as e:
             return {"up": False, "error": type(e).__name__}
 

@@ -85,3 +85,20 @@ Volumes: `pg-a{1,2,3}-data`, `pg-b{1,2}-data`, `wal-archive-a`, `wal-archive-b` 
 | M9 | Dashboard polish, README, REPORT, `demo-all` | full run captured |
 
 Each milestone: run its demo/tests, paste real output into the commit/notes, then commit.
+
+## 5. Status and changes made during implementation
+
+All milestones M1–M9 are done; each was committed after its demo/tests passed.
+
+Decisions added or changed while building (details in [docs/REPORT.md §6](docs/REPORT.md#6-problems-the-demos-surfaced-and-how-they-were-fixed)):
+
+| # | Change | Reason |
+|---|--------|--------|
+| D15 | Host ports moved to the 1xxxx range; no fixed `container_name`s | clashed with other local projects (8080, a `haproxy` container) |
+| D16 | Replica lag is simulated with a **delayed replica** (`recovery_min_apply_delay` via the member's Patroni config), not `pg_wal_replay_pause()` | Patroni resumes paused replay within one loop and strips recovery params from `postgresql.auto.conf` |
+| D17 | `archive_wal.sh` instead of `test ! -f && cp` | the new primary re-archives already-archived segments after a failover; the naive command blocked archiving forever |
+| D18 | Dedicated 2PC **control pools** (txn_log, COMMIT/ROLLBACK PREPARED, resolver) | pool deadlock under 100 concurrent bids on one item |
+| D19 | Bid validation reads only the **locked row** | READ COMMITTED subquery snapshot let several bids win the same price slot |
+| D20 | Replicas in Patroni state `in archive recovery` stay read candidates | otherwise reads failed during a primary failover |
+| D21 | Circuit breakers per DB member + Redis; server-side bid retries (idempotent) | fail fast instead of paying a timeout per request |
+| D22 | `make up` does not rebuild images; `make redeploy` rebuilds only apps/monitor with `--no-deps` | non-reproducible image digests made Compose recreate the DB containers |

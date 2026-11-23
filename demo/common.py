@@ -145,3 +145,26 @@ def set_apply_delay(member: str, delay: str | None, db: str = "auction") -> None
     want = delay or "0"
     wait_for(lambda: psql(member, db, "SHOW recovery_min_apply_delay").strip() == want, 15, 0.3,
              f"{member} recovery_min_apply_delay={want}")
+
+
+def cluster_ready(shard: str) -> bool:
+    """Leader running, a sync standby assigned, and every replica streaming."""
+    c = patroni_cluster(shard)
+    if not c:
+        return False
+    n = {"A": 3, "B": 2}[shard]
+    ms = c["members"]
+    return (len(ms) == n and any(m["role"] == "leader" and m["state"] == "running" for m in ms)
+            and any(m["role"] == "sync_standby" for m in ms)
+            and all(m["state"] == "streaming" for m in ms if m["role"] != "leader"))
+
+
+def wait_cluster_ready(timeout: float = 120) -> float:
+    """After a fresh bootstrap replicas first catch up from the archive before they stream
+    and Patroni assigns the sync standby; demos need that steady state."""
+    return wait_for(lambda: cluster_ready("A") and cluster_ready("B"), timeout, 0.5, "both clusters streaming with a sync standby")
+
+
+if __name__ == "__main__":
+    t = wait_cluster_ready()
+    ok(f"both DB clusters ready (leader + sync standby + streaming replicas) after {t:.1f}s")

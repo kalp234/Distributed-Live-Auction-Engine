@@ -224,6 +224,7 @@ services:
 
   # One-shot seeding (skips if data already exists)
   seed:
+    build: ./tools             # tools image built here so plain `docker compose up` works
     image: auction/tools:latest
     pull_policy: never
     depends_on:
@@ -240,7 +241,6 @@ services:
   # Demo / chaos / test runner (not started by `up`; used via `make demo-*`)
   # -------------------------------------------------------------------------
   tools:
-    build: ./tools
     image: auction/tools:latest
     pull_policy: never
     profiles: ["tools"]

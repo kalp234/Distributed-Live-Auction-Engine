@@ -1,0 +1,51 @@
+$ make check
+
+════════════════════
+  Stack check (M1)
+════════════════════
+
+▶ Containers
+  ✔ etcd     Up 13 seconds (healthy)
+  ✔ pg-a1    Up 10 seconds (healthy)
+  ✔ pg-a2    Up 10 seconds (healthy)
+  ✔ pg-a3    Up 10 seconds (healthy)
+  ✔ pg-b1    Up 10 seconds (healthy)
+  ✔ pg-b2    Up 10 seconds (healthy)
+  ✔ redis    Up 13 seconds (healthy)
+  ✔ app1     Up 10 seconds (healthy)
+  ✔ app2     Up 10 seconds (healthy)
+  ✔ app3     Up 10 seconds (healthy)
+  ✔ haproxy  Up 10 seconds
+
+▶ Shard A (Patroni view)
+  pg-a1  replica       streaming  TL=1  lag=0
+  pg-a2  leader        running    TL=1  lag=
+  pg-a3  sync_standby  streaming  TL=1  lag=0
+  ✔ exactly one leader (got 1)
+  ✔ one synchronous standby
+  ✔ one asynchronous replica
+  ✔ 3 members
+  pg_stat_replication on pg-a2: pg-a3:sync pg-a1:async
+  ✔ max_prepared_transactions=100 (2PC enabled)
+  ✔ WAL archiver: failed_count=0
+
+▶ Shard B (Patroni view)
+  pg-b1  sync_standby  streaming  TL=1  lag=0
+  pg-b2  leader        running    TL=1  lag=
+  ✔ exactly one leader (got 1)
+  ✔ one synchronous standby
+  ✔ 2 members
+  pg_stat_replication on pg-b2: pg-b1:sync
+  ✔ max_prepared_transactions=100 (2PC enabled)
+  ✔ WAL archiver: failed_count=0
+
+▶ App nodes (direct)
+  ✔ app1: ready, A-leader=pg-a2 B-leader=pg-b2
+  ✔ app2: ready, A-leader=pg-a2 B-leader=pg-b2
+  ✔ app3: ready, A-leader=pg-a2 B-leader=pg-b2
+
+▶ HAProxy round-robin (30 requests)
+  app1=10  app2=10  app3=10
+  ✔ requests spread evenly over app1..app3
+
+ALL CHECKS PASSED

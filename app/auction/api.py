@@ -170,6 +170,9 @@ async def node() -> dict[str, Any]:
             "two_pc": {"committed": tpc_stats.committed, "aborted": tpc_stats.aborted,
                        "phase2_deferred": tpc_stats.phase2_deferred, "abort_reasons": tpc_stats.by_reason},
             "faults": faults.armed(),
+            "closer_leader": bool(rt.closer and rt.closer.is_leader),
+            "open_breakers": [f"{s.shard}/{n}" for s in (rt.shard_a, rt.shard_b) for n, b in s.breakers.items()
+                              if b.state != "closed"] + (["redis"] if rt.hub.breaker.state != "closed" else []),
             "shards": [rt.shard_a.snapshot(), rt.shard_b.snapshot()]}
 
 

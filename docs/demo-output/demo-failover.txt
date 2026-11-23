@@ -1,0 +1,146 @@
+$ make demo-failover
+
+════════════════════════════════════════════════════════════════
+  DEMO [T3] Availability — automatic failover of shard A and B
+════════════════════════════════════════════════════════════════
+  Patroni: ttl=10s loop_wait=2s; apps poll topology every 1s; target downtime < 15s
+
+▶ Shard A (auction DB) — before
+  pg-a1  sync_standby  streaming  TL=1  lag=0
+  pg-a2  leader        running    TL=1  lag=
+  pg-a3  replica       streaming  TL=1  lag=0
+  primary=pg-a2  sync standby=pg-a1  timeline=1
+
+▶ Continuous load on item #15 (4 bidders + 4 readers via HAProxy)
+  t=  0s  ok=406  rej=112 fail=0   bids=98  │ nodes: app1=179 app2=169 app3=170 │ reads: pg-a1=161 pg-a3=146 │ writes: pg-a2=99
+  t=  1s  ok=432  rej=103 fail=0   bids=117 │ nodes: app1=174 app2=178 app3=183 │ reads: pg-a1=151 pg-a3=165 │ writes: pg-a2=116
+  t=  2s  ok=431  rej=114 fail=0   bids=111 │ nodes: app1=171 app2=193 app3=181 │ reads: pg-a1=166 pg-a3=154 │ writes: pg-a2=111
+
+▶ SIGKILL primary pg-a2  (docker kill — the whole DB server disappears)
+  t=  3s  ok=257  rej=28  fail=0   bids=29  │ nodes: app1=99 app2=96 app3=90 │ reads: pg-a1=117 pg-a3=111 │ writes: pg-a2=29  pg-a2 killed
+  t=  4s  ok=276  rej=0   fail=7   bids=0   │ nodes: app1=91 app2=91 app3=94 │ reads: pg-a1=138 pg-a3=138 │ writes: -  pg-a2 killed
+  t=  5s  ok=272  rej=0   fail=2   bids=0   │ nodes: app1=90 app2=92 app3=90 │ reads: pg-a1=136 pg-a3=136 │ writes: -  pg-a2 killed
+  t=  6s  ok=276  rej=0   fail=3   bids=0   │ nodes: app1=92 app2=92 app3=92 │ reads: pg-a1=138 pg-a3=138 │ writes: -  pg-a2 killed
+  t=  7s  ok=267  rej=0   fail=4   bids=0   │ nodes: app1=89 app2=90 app3=88 │ reads: pg-a1=134 pg-a3=133 │ writes: -  pg-a2 killed
+  t=  8s  ok=276  rej=0   fail=2   bids=0   │ nodes: app1=91 app2=92 app3=93 │ reads: pg-a1=137 pg-a3=139 │ writes: -  pg-a2 killed
+  t=  9s  ok=268  rej=0   fail=2   bids=0   │ nodes: app1=89 app2=89 app3=90 │ reads: pg-a1=134 pg-a3=134 │ writes: -  pg-a2 killed
+  t= 10s  ok=260  rej=0   fail=3   bids=0   │ nodes: app1=87 app2=88 app3=85 │ reads: pg-a1=130 pg-a3=130 │ writes: -  pg-a2 killed
+  t= 11s  ok=272  rej=0   fail=1   bids=0   │ nodes: app1=91 app2=91 app3=90 │ reads: pg-a1=137 pg-a3=135 │ writes: -  pg-a2 killed
+  t= 12s  ok=268  rej=0   fail=2   bids=0   │ nodes: app1=90 app2=90 app3=88 │ reads: pg-a1=133 pg-a3=135 │ writes: -  pg-a2 killed
+  t= 13s  ok=292  rej=3   fail=3   bids=9   │ nodes: app1=99 app2=95 app3=101 │ reads: pg-a1=85 pg-a3=198 │ writes: pg-a1=9  pg-a2 killed
+  t= 14s  ok=383  rej=86  fail=0   bids=74  │ nodes: app1=158 app2=160 app3=151 │ reads: pg-a3=309 │ writes: pg-a1=74  pg-a2 killed
+  t= 15s  ok=428  rej=122 fail=0   bids=112 │ nodes: app1=181 app2=174 app3=195 │ reads: pg-a3=316 │ writes: pg-a1=112  pg-a2 killed
+  t= 16s  ok=432  rej=118 fail=0   bids=104 │ nodes: app1=176 app2=185 app3=189 │ reads: pg-a3=328 │ writes: pg-a1=104  pg-a2 killed
+  t= 17s  ok=394  rej=120 fail=0   bids=94  │ nodes: app1=164 app2=184 app3=166 │ reads: pg-a3=300 │ writes: pg-a1=94  pg-a2 killed
+  t= 18s  ok=427  rej=126 fail=0   bids=107 │ nodes: app1=181 app2=196 app3=176 │ reads: pg-a3=320 │ writes: pg-a1=107  pg-a2 killed
+  t= 19s  ok=412  rej=113 fail=0   bids=104 │ nodes: app1=178 app2=177 app3=170 │ reads: pg-a3=308 │ writes: pg-a1=104  pg-a2 killed
+  t= 20s  ok=440  rej=113 fail=0   bids=123 │ nodes: app1=186 app2=183 app3=184 │ reads: pg-a3=317 │ writes: pg-a1=123  pg-a2 killed
+  Patroni promoted pg-a1 9.9s after the kill (the former sync standby)
+  ✔ the synchronous standby was promoted (zero data loss guaranteed)
+  WRITE DOWNTIME: 10.2s  (last commit -0.0s, first commit after failover +10.2s relative to the kill)
+  ✔ write downtime 10.2s < 15s target
+  reads during the 15 s after the kill: ok=4199 failed=0  served by {'pg-a1': 1419, 'pg-a3': 2780}
+  ✔ reads stayed available every second of the failover (served by replicas)
+
+▶ Restart old primary pg-a2 → must rejoin as a replica (pg_rewind), not as a second primary
+  t= 21s  ok=350  rej=85  fail=0   bids=76  │ nodes: app1=150 app2=142 app3=143 │ reads: pg-a3=274 │ writes: pg-a1=76  pg-a2 rejoined
+  t= 22s  ok=395  rej=98  fail=0   bids=90  │ nodes: app1=164 app2=165 app3=164 │ reads: pg-a3=305 │ writes: pg-a1=90  pg-a2 rejoined
+  t= 23s  ok=437  rej=117 fail=0   bids=114 │ nodes: app1=174 app2=194 app3=186 │ reads: pg-a3=323 │ writes: pg-a1=114  pg-a2 rejoined
+  t= 24s  ok=419  rej=116 fail=0   bids=106 │ nodes: app1=185 app2=180 app3=170 │ reads: pg-a3=313 │ writes: pg-a1=106  pg-a2 rejoined
+  t= 25s  ok=415  rej=122 fail=0   bids=91  │ nodes: app1=173 app2=184 app3=180 │ reads: pg-a3=324 │ writes: pg-a1=91  pg-a2 rejoined
+  t= 26s  ok=432  rej=117 fail=0   bids=114 │ nodes: app1=179 app2=190 app3=180 │ reads: pg-a3=318 │ writes: pg-a1=114  pg-a2 rejoined
+  t= 27s  ok=433  rej=116 fail=0   bids=113 │ nodes: app1=180 app2=190 app3=179 │ reads: pg-a3=320 │ writes: pg-a1=113  pg-a2 rejoined
+  t= 28s  ok=413  rej=109 fail=0   bids=95  │ nodes: app1=171 app2=173 app3=178 │ reads: pg-a2=65 pg-a3=253 │ writes: pg-a1=95  pg-a2 rejoined
+  t= 29s  ok=414  rej=120 fail=0   bids=99  │ nodes: app1=179 app2=180 app3=175 │ reads: pg-a2=154 pg-a3=161 │ writes: pg-a1=99  pg-a2 rejoined
+  t= 30s  ok=420  rej=109 fail=0   bids=102 │ nodes: app1=178 app2=177 app3=174 │ reads: pg-a2=167 pg-a3=151 │ writes: pg-a1=102  pg-a2 rejoined
+  pg-a1  leader        running    TL=2  lag=
+  pg-a2  replica       streaming  TL=2  lag=0
+  pg-a3  sync_standby  streaming  TL=2  lag=0
+  timeline 1 → 2;  pg-a2 rejoin log:
+      pg_rewind exit code=0
+      stderr=pg_rewind: servers diverged at WAL location 0/65B9640 on timeline 1
+      starting as a secondary
+  patronictl history (last entry): |  1 | 106665536 | no recovery target specified | 2026-11-23T19:00:48.740221+00:00 | pg-a1      |
+  ✔ new timeline after promotion
+  ✔ pg-a2 is back as a replica
+  split-brain probe: 122 samples; writable primaries over time: ['pg-a2'] → ['none'] → ['pg-a1']
+  ✔ never more than one writable primary (max seen: 1)
+  bids: confirmed to clients=2110 stored=2110  │ requests ok=11409 rejected=2299 failed=29 (client retries=29)
+  ✔ no confirmed bid lost across the failover (missing 0)
+
+▶ Shard B (wallet DB) — before
+  pg-b1  sync_standby  streaming  TL=1  lag=0
+  pg-b2  leader        running    TL=1  lag=
+  primary=pg-b2  sync standby=pg-b1  timeline=1
+
+▶ Continuous load on item #34 (4 bidders + 4 readers via HAProxy)
+  t=  0s  ok=404  rej=103 fail=0   bids=97  │ nodes: app1=168 app2=173 app3=166 │ reads: pg-a2=158 pg-a3=149 │ writes: pg-a1=97
+  t=  1s  ok=411  rej=112 fail=0   bids=98  │ nodes: app1=176 app2=179 app3=168 │ reads: pg-a2=161 pg-a3=152 │ writes: pg-a1=98
+  t=  2s  ok=415  rej=114 fail=0   bids=97  │ nodes: app1=180 app2=176 app3=173 │ reads: pg-a2=167 pg-a3=151 │ writes: pg-a1=97
+
+▶ SIGKILL primary pg-b2  (docker kill — the whole DB server disappears)
+  t=  3s  ok=203  rej=2   fail=1   bids=2   │ nodes: app1=68 app2=69 app3=68 │ reads: pg-a2=101 pg-a3=100 │ writes: pg-a1=2  pg-b2 killed
+  t=  4s  ok=284  rej=0   fail=7   bids=0   │ nodes: app1=95 app2=95 app3=94 │ reads: pg-a2=141 pg-a3=143 │ writes: -  pg-b2 killed
+  t=  5s  ok=274  rej=0   fail=3   bids=0   │ nodes: app1=90 app2=93 app3=91 │ reads: pg-a2=137 pg-a3=137 │ writes: -  pg-b2 killed
+  t=  6s  ok=274  rej=0   fail=1   bids=0   │ nodes: app1=93 app2=90 app3=91 │ reads: pg-a2=138 pg-a3=136 │ writes: -  pg-b2 killed
+  t=  7s  ok=276  rej=0   fail=4   bids=0   │ nodes: app1=92 app2=92 app3=92 │ reads: pg-a2=138 pg-a3=138 │ writes: -  pg-b2 killed
+  t=  8s  ok=272  rej=0   fail=2   bids=0   │ nodes: app1=92 app2=89 app3=91 │ reads: pg-a2=135 pg-a3=137 │ writes: -  pg-b2 killed
+  t=  9s  ok=269  rej=0   fail=2   bids=0   │ nodes: app1=90 app2=90 app3=89 │ reads: pg-a2=135 pg-a3=134 │ writes: -  pg-b2 killed
+  t= 10s  ok=271  rej=0   fail=3   bids=0   │ nodes: app1=91 app2=91 app3=89 │ reads: pg-a2=135 pg-a3=136 │ writes: -  pg-b2 killed
+  t= 11s  ok=272  rej=0   fail=1   bids=0   │ nodes: app1=91 app2=90 app3=91 │ reads: pg-a2=137 pg-a3=135 │ writes: -  pg-b2 killed
+  t= 12s  ok=272  rej=0   fail=3   bids=0   │ nodes: app1=88 app2=91 app3=93 │ reads: pg-a2=135 pg-a3=137 │ writes: -  pg-b2 killed
+  t= 13s  ok=280  rej=0   fail=4   bids=0   │ nodes: app1=94 app2=92 app3=94 │ reads: pg-a2=140 pg-a3=140 │ writes: -  pg-b2 killed
+  t= 14s  ok=343  rej=50  fail=0   bids=48  │ nodes: app1=127 app2=133 app3=133 │ reads: pg-a2=149 pg-a3=146 │ writes: pg-a1=48  pg-b2 killed
+  t= 15s  ok=431  rej=111 fail=0   bids=108 │ nodes: app1=178 app2=177 app3=187 │ reads: pg-a2=159 pg-a3=164 │ writes: pg-a1=108  pg-b2 killed
+  t= 16s  ok=431  rej=112 fail=0   bids=111 │ nodes: app1=182 app2=180 app3=181 │ reads: pg-a2=159 pg-a3=161 │ writes: pg-a1=111  pg-b2 killed
+  t= 17s  ok=406  rej=100 fail=0   bids=102 │ nodes: app1=170 app2=169 app3=167 │ reads: pg-a2=156 pg-a3=148 │ writes: pg-a1=102  pg-b2 killed
+  t= 18s  ok=426  rej=115 fail=0   bids=108 │ nodes: app1=181 app2=179 app3=181 │ reads: pg-a2=162 pg-a3=156 │ writes: pg-a1=108  pg-b2 killed
+  t= 19s  ok=414  rej=116 fail=0   bids=99  │ nodes: app1=166 app2=183 app3=181 │ reads: pg-a2=167 pg-a3=148 │ writes: pg-a1=99  pg-b2 killed
+  t= 20s  ok=402  rej=106 fail=0   bids=99  │ nodes: app1=164 app2=177 app3=167 │ reads: pg-a2=161 pg-a3=142 │ writes: pg-a1=99  pg-b2 killed
+  Patroni promoted pg-b1 10.6s after the kill (the former sync standby)
+  ✔ the synchronous standby was promoted (zero data loss guaranteed)
+  WRITE DOWNTIME: 10.8s  (last commit +0.3s, first commit after failover +11.1s relative to the kill)
+  ✔ write downtime 10.8s < 15s target
+  reads during the 15 s after the kill: ok=4187 failed=0  served by {'pg-a3': 2092, 'pg-a2': 2095}
+  ✔ reads stayed available every second of the failover (served by replicas)
+
+▶ Restart old primary pg-b2 → must rejoin as a replica (pg_rewind), not as a second primary
+  t= 21s  ok=350  rej=88  fail=0   bids=81  │ nodes: app1=140 app2=152 app3=146 │ reads: pg-a2=133 pg-a3=136 │ writes: pg-a1=81  pg-b2 rejoined
+  t= 22s  ok=391  rej=96  fail=0   bids=82  │ nodes: app1=163 app2=158 app3=166 │ reads: pg-a2=158 pg-a3=151 │ writes: pg-a1=82  pg-b2 rejoined
+  t= 23s  ok=413  rej=112 fail=0   bids=100 │ nodes: app1=171 app2=176 app3=178 │ reads: pg-a2=162 pg-a3=151 │ writes: pg-a1=100  pg-b2 rejoined
+  t= 24s  ok=423  rej=117 fail=0   bids=102 │ nodes: app1=172 app2=178 app3=190 │ reads: pg-a2=159 pg-a3=162 │ writes: pg-a1=102  pg-b2 rejoined
+  t= 25s  ok=425  rej=112 fail=0   bids=107 │ nodes: app1=178 app2=175 app3=184 │ reads: pg-a2=163 pg-a3=155 │ writes: pg-a1=107  pg-b2 rejoined
+  t= 26s  ok=424  rej=117 fail=0   bids=108 │ nodes: app1=187 app2=172 app3=182 │ reads: pg-a2=148 pg-a3=168 │ writes: pg-a1=108  pg-b2 rejoined
+  t= 27s  ok=429  rej=114 fail=0   bids=104 │ nodes: app1=180 app2=175 app3=188 │ reads: pg-a2=164 pg-a3=161 │ writes: pg-a1=104  pg-b2 rejoined
+  t= 28s  ok=425  rej=113 fail=0   bids=102 │ nodes: app1=182 app2=177 app3=179 │ reads: pg-a2=167 pg-a3=156 │ writes: pg-a1=102  pg-b2 rejoined
+  t= 29s  ok=425  rej=119 fail=0   bids=100 │ nodes: app1=184 app2=184 app3=176 │ reads: pg-a2=162 pg-a3=163 │ writes: pg-a1=100  pg-b2 rejoined
+  t= 30s  ok=417  rej=108 fail=0   bids=101 │ nodes: app1=180 app2=177 app3=168 │ reads: pg-a2=161 pg-a3=155 │ writes: pg-a1=101  pg-b2 rejoined
+  pg-b1  leader        running    TL=2  lag=
+  pg-b2  sync_standby  streaming  TL=2  lag=0
+  timeline 1 → 2;  pg-b2 rejoin log:
+      pg_rewind exit code=0
+      stderr=pg_rewind: servers diverged at WAL location 0/62FBDA8 on timeline 1
+      starting as a secondary
+  patronictl history (last entry): |  1 | 103792040 | no recovery target specified | 2026-11-23T19:01:20.853440+00:00 | pg-b1      |
+  ✔ new timeline after promotion
+  ✔ pg-b2 is back as a replica
+  split-brain probe: 121 samples; writable primaries over time: ['pg-b2'] → ['none'] → ['pg-b1']
+  ✔ never more than one writable primary (max seen: 1)
+  bids: confirmed to clients=1971 stored=1971  │ requests ok=11211 rejected=2153 failed=31 (client retries=31)
+  ✔ no confirmed bid lost across the failover (missing 0)
+
+▶ Invariants after failover
+  Σ balance = $10000.00   Σ held = $501.41   Σ active holds = $501.41   wallets=10 items=16 bids=6551 holds=6551 txns=13060
+  ✔ M1 money conserved: Σ balance 10000.00 == supply 10000.00
+  ✔ M2 0 ≤ held ≤ balance for all wallets 
+  ✔ M3 held == Σ active holds per wallet 
+  ✔ M4 at most one active hold per item
+  ✔ X1 open items: one active hold = highest bid 
+  ✔ X2 items without bids hold no money 
+  ✔ X3 sold items: winner's hold settled to seller 
+  ✔ X4 every bid/hold comes from a COMMITTED 2PC txn 
+  ✔ A1 current_price/highest_bidder match the max bid 
+  ✔ A2 exactly one bid at the winning price per item 
+  ✔ T1 no in-doubt txns: prepared A=0 B=0, txn_log incomplete=0
+
+ALL CHECKS PASSED

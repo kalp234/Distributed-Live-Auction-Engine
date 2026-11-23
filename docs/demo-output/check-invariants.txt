@@ -1,0 +1,21 @@
+$ make check-invariants
+
+════════════════════════
+  Invariant check [T4]
+════════════════════════
+
+▶ Money, cross-shard consistency, auction state, 2PC log
+  Σ balance = $10000.00   Σ held = $793.45   Σ active holds = $793.45   wallets=10 items=18 bids=7594 holds=7594 txns=15032
+  ✔ M1 money conserved: Σ balance 10000.00 == supply 10000.00
+  ✔ M2 0 ≤ held ≤ balance for all wallets 
+  ✔ M3 held == Σ active holds per wallet 
+  ✔ M4 at most one active hold per item
+  ✔ X1 open items: one active hold = highest bid 
+  ✔ X2 items without bids hold no money 
+  ✔ X3 sold items: winner's hold settled to seller 
+  ✔ X4 every bid/hold comes from a COMMITTED 2PC txn 
+  ✔ A1 current_price/highest_bidder match the max bid 
+  ✔ A2 exactly one bid at the winning price per item 
+  ✔ T1 no in-doubt txns: prepared A=0 B=0, txn_log incomplete=0
+
+ALL CHECKS PASSED

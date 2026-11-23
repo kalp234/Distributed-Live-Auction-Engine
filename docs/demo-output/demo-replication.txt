@@ -1,0 +1,56 @@
+$ make demo-replication
+
+═════════════════════════
+  DEMO [T1] Replication
+═════════════════════════
+
+▶ 1. Shard A topology (Patroni) and pg_stat_replication on the primary
+  pg-a1  replica       streaming  TL=1  lag=0
+  pg-a2  leader        running    TL=1  lag=
+  pg-a3  sync_standby  streaming  TL=1  lag=0
+  pg_stat_replication on pg-a2: pg-a3=sync, pg-a1=async
+  synchronous_commit = remote_apply  synchronous_standby_names = "pg-a3"
+
+▶ 2. Write on the primary → visible on every replica
+  bid $11 → 200 via app2 on DB pg-a2 (14 ms)
+  bid $12 → 200 via app3 on DB pg-a2 (15 ms)
+  bid $13 → 200 via app1 on DB pg-a2 (11 ms)
+  pg-a2  primary       bids=3   highest=$13.00    lsn=0/4026928
+  pg-a3  sync replica  bids=3   highest=$13.00    lsn=0/4026928
+  pg-a1  async replica bids=3   highest=$13.00    lsn=0/4026928
+  ✔ all 3 nodes hold identical bid data
+
+▶ 3. Sync vs async — make the async replica (pg-a1) lag: recovery_min_apply_delay = 1h
+  pg-a1: recovery_min_apply_delay = 1h
+  5 more bids committed; commit latency avg 5 ms (async replica does not slow commits)
+  pg-a2  primary       bids=8   highest=$24.00    lsn=0/402C030
+  pg-a3  sync replica  bids=8   highest=$24.00    lsn=0/402C030
+  pg-a1  async replica bids=3   highest=$13.00    lsn=0/4026AD0
+  ✔ sync replica is current (remote_apply): highest=$24
+  ✔ async replica is stale while lagging: highest=$13
+  replication lag as seen by the primary (WAL is received but not yet applied):
+  pg-a1  async  sent_lag=0B  flush_lag=0B  replay_lag=21856B  replay_lag_ms=24.85
+  pg-a3  sync   sent_lag=0B  flush_lag=0B  replay_lag=0B  replay_lag_ms=0.28
+  ✔ async: flush lag 0 B but replay lag > 0 B
+
+▶ 4. Read-your-writes with X-Min-LSN (async replica still lagging)
+  bid $30 accepted; response X-Write-LSN = 0/402CAE0
+  WITHOUT session token  30 reads → served by {'pg-a1': 15, 'pg-a3': 15}  stale reads = 15
+  ✔ without a token some reads hit the stale async replica
+  WITH X-Min-LSN         30 reads → served by {'pg-a2': 15, 'pg-a3': 15}  stale reads = 0  fallbacks: {'replica-behind-min-lsn': 15}
+  ✔ with X-Min-LSN no read returns stale data
+
+▶ Remove the delay on pg-a1
+  pg-a2  primary       bids=9   highest=$30.00    lsn=0/402CAE0
+  pg-a3  sync replica  bids=9   highest=$30.00    lsn=0/402CAE0
+  pg-a1  async replica bids=9   highest=$30.00    lsn=0/402CAE0
+  ✔ async replica caught up as soon as the delay was removed
+
+▶ 5. The cost of synchronous replication — delay apply on the SYNC replica (pg-a3) by 500 ms
+  bid $40 → 200 after 2538 ms (vs 7 ms without the delay) ≈ 5 synchronous commits on Shard A, each waiting for the sync replica to apply
+  (txn_log INIT, PREPARE TRANSACTION, PREPARED, COMMITTED, COMMIT PREPARED, completed)
+  ✔ every Shard A commit waited until the sync replica had applied it (synchronous_commit=remote_apply)
+  Trade-off (CAP): sync = no lost commits on failover + fresh reads, paid with write latency and
+  availability coupling to one replica; async = fast writes, but may lose the tail / serve stale reads.
+
+ALL CHECKS PASSED

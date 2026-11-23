@@ -5,13 +5,14 @@ from collections import Counter
 
 import httpx
 
-from demo.common import (APPS, LB_URL, Checks, banner, docker, info, patroni_cluster,
+from demo.common import (wait_cluster_ready, APPS, LB_URL, Checks, banner, docker, info, patroni_cluster,
                          print_cluster, psql, step)
 
 
 def main() -> None:
     banner("Stack check (M1)")
     c = Checks()
+    wait_cluster_ready()
 
     step("Containers")
     out = docker("ps", "--filter", "label=com.docker.compose.project=auction",
