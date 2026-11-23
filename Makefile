@@ -3,7 +3,7 @@ COMPOSE := docker compose
 TOOLS   := $(COMPOSE) run --rm tools
 
 
-.PHONY: help build redeploy up down clean ps logs status check seed check-live load demo-lb demo-replication check-invariants demo-dtx test demo-fault
+.PHONY: help build redeploy up down clean ps logs status check seed check-live load demo-lb demo-replication check-invariants demo-dtx test demo-fault demo-failover
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -68,3 +68,6 @@ test:            ## pytest: unit + integration (RESETS demo data first)
 
 demo-fault:      ## [T2] kill app2, a DB replica and Redis under load; no committed bid lost
 	$(TOOLS) python -m demo.demo_fault
+
+demo-failover:   ## [T3] kill each shard's primary under load: measured downtime, rejoin, no split-brain
+	$(TOOLS) python -m demo.demo_failover $(SHARD)

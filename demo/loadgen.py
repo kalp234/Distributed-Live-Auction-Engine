@@ -30,6 +30,8 @@ class Bucket:
     ok: int = 0
     rejected: int = 0
     failed: int = 0
+    read_failed: int = 0
+    read_ok: int = 0
     bids_ok: int = 0
     nodes: Counter = field(default_factory=Counter)      # X-Served-By
     db_reads: Counter = field(default_factory=Counter)   # X-DB-Node on GETs
@@ -49,6 +51,7 @@ class LoadGen:
         self.accepted_bids: list[dict[str, Any]] = []   # every bid the server confirmed
         self.retries = 0
         self.printed = -1   # last per-second bucket printed by ticker()
+        self.write_log: list[tuple[float, str]] = []   # (time, ok|rejected|failed) per bid attempt
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self.http = httpx.AsyncClient(base_url=base, timeout=httpx.Timeout(5.0, connect=2.0),
@@ -64,9 +67,15 @@ class LoadGen:
         for x in (b, self.total):
             if r is None:
                 x.failed += 1
+                x.read_failed += 0 if write else 1
                 x.errors[err or "error"] += 1
                 continue
             node = r.headers.get("x-served-by", "?")
+            if not write:
+                if r.status_code < 400:
+                    x.read_ok += 1
+                elif r.status_code >= 500:
+                    x.read_failed += 1
             if r.status_code < 400:
                 x.ok += 1
                 x.nodes[node] += 1
@@ -78,9 +87,10 @@ class LoadGen:
             else:
                 x.failed += 1
                 x.errors[f"{r.status_code}"] += 1
-        if r is None:
-            return "failed"
-        return "ok" if r.status_code < 400 else ("rejected" if r.status_code < 500 else "failed")
+        kind = "failed" if r is None else ("ok" if r.status_code < 400 else ("rejected" if r.status_code < 500 else "failed"))
+        if write:
+            self.write_log.append((time.time(), kind))
+        return kind
 
     # ------------------------------------------------------------------ workers
     async def _reader(self) -> None:

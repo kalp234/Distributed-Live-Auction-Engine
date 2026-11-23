@@ -60,7 +60,11 @@ class Member:
 
     @property
     def is_usable_replica(self) -> bool:
-        return self.role in ("replica", "sync_standby", "quorum_standby") and self.state in ("streaming", "running")
+        # "in archive recovery": the replica lost its upstream (e.g. the primary just died)
+        # and replays from the WAL archive. It is still up and holds every acknowledged
+        # commit, so it keeps serving reads during a failover [T3].
+        return (self.role in ("replica", "sync_standby", "quorum_standby")
+                and self.state in ("streaming", "running", "in archive recovery"))
 
 
 @dataclass

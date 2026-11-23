@@ -62,9 +62,10 @@ def test_read_candidates_exclude_lagging_and_non_streaming_replicas():
         "pg-a2": Member("pg-a2", "pg-a2", 5432, "sync_standby", "streaming", 0, 1),
         "pg-a3": Member("pg-a3", "pg-a3", 5432, "replica", "streaming", 0, 1),
         "pg-a4": Member("pg-a4", "pg-a4", 5432, "replica", "starting", 0, 1),
+        "pg-a5": Member("pg-a5", "pg-a5", 5432, "replica", "in archive recovery", 0, 1),  # primary just died
     }
     s.replication = {"pg-a3": {"replay_lag_bytes": 5000}, "pg-a2": {"replay_lag_bytes": 10}}
-    assert [m.name for m in s.read_candidates()] == ["pg-a2"]
+    assert sorted(m.name for m in s.read_candidates()) == ["pg-a2", "pg-a5"]
     s.replication["pg-a3"]["replay_lag_bytes"] = 999
-    assert sorted(m.name for m in s.read_candidates()) == ["pg-a2", "pg-a3"]
+    assert sorted(m.name for m in s.read_candidates()) == ["pg-a2", "pg-a3", "pg-a5"]
     assert s.members["pg-a1"].is_leader and not s.members["pg-a4"].is_usable_replica
