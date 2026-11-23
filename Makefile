@@ -2,18 +2,24 @@
 COMPOSE := docker compose
 TOOLS   := $(COMPOSE) run --rm tools
 
-.PHONY: help build up down clean ps logs status check seed check-live load demo-lb
+
+.PHONY: help build redeploy up down clean ps logs status check seed check-live load demo-lb demo-replication
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
-build:           ## build all images
+build:           ## rebuild all images (next `make up` then recreates the DB containers too)
 	$(COMPOSE) --profile tools build
 
-SERVICES := etcd pg-a1 pg-a2 pg-a3 pg-b1 pg-b2 redis app1 app2 app3 haproxy
+redeploy:        ## rebuild + restart only the stateless tier (apps, monitor) — DBs untouched
+	$(COMPOSE) up -d --build --no-deps --wait app1 app2 app3 monitor
 
+SERVICES := etcd pg-a1 pg-a2 pg-a3 pg-b1 pg-b2 redis app1 app2 app3 haproxy monitor
+
+# Note: `up` builds images only if they are missing. Image builds are not reproducible here,
+# so rebuilding on every `up` would make Compose recreate (restart) the database containers.
 up:              ## start the whole stack, wait until healthy, seed if empty
-	$(COMPOSE) build
+	$(COMPOSE) --profile tools build tools
 	$(COMPOSE) up -d --wait $(SERVICES)
 	$(COMPOSE) run --rm --no-deps seed
 
@@ -47,3 +53,6 @@ load:            ## run the load generator (DURATION=20 READERS=6 BIDDERS=3)
 
 demo-lb:         ## [T6] load balancing: distribution, node kill + redistribution, WS fan-out
 	$(TOOLS) python -m demo.demo_lb
+
+demo-replication: ## [T1] replication: propagation, sync vs async, read-your-writes, sync cost
+	$(TOOLS) python -m demo.demo_replication

@@ -5,6 +5,8 @@ set -euo pipefail
 psql "$1" -v ON_ERROR_STOP=1 <<SQL
 CREATE ROLE ${APP_DB_USER} LOGIN PASSWORD '${APP_DB_PASSWORD}';
 CREATE DATABASE ${SHARD_DB} OWNER ${APP_DB_USER};
+-- read pg_stat_replication / pg_stat_activity for the lag dashboard
+GRANT pg_monitor TO ${APP_DB_USER};
 \connect ${SHARD_DB}
 SET ROLE ${APP_DB_USER};
 \i /sql/${SHARD_DB}.sql

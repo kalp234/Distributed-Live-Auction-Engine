@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auction Cluster Monitor</title>
+<style>
+  :root { --bg:#0f1220; --panel:#181c2e; --line:#2a3050; --text:#e6e8f2; --muted:#8b91ad;
+          --accent:#5b8cff; --ok:#3ecf8e; --warn:#f5b84b; --bad:#ff6b6b;
+          --n1:#5b8cff; --n2:#3ecf8e; --n3:#f5b84b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; flex-wrap:wrap; gap:14px; align-items:baseline; padding:12px 16px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:17px; margin:0; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap:12px; padding:12px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; min-width:0; }
+  section.wide { grid-column: 1 / -1; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin:0 0 8px; display:flex; justify-content:space-between; }
+  table { width:100%; border-collapse:collapse; }
+  .scroll { overflow-x:auto; }
+  td, th { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; }
+  .ok { color:var(--ok) } .warn { color:var(--warn) } .bad { color:var(--bad) } .muted { color:var(--muted) }
+  .pill { display:inline-block; padding:1px 7px; border-radius:999px; font-size:11px; border:1px solid currentColor; }
+  .big { font-size:22px; font-weight:700; }
+  .stack { display:flex; height:22px; border-radius:6px; overflow:hidden; background:#0f1325; margin:6px 0; }
+  .stack div { display:flex; align-items:center; justify-content:center; font-size:11px; color:#0f1220; font-weight:600; transition:width .4s; }
+  .bars { display:flex; align-items:flex-end; gap:2px; height:70px; margin-top:6px; }
+  .bars .col { flex:1; display:flex; flex-direction:column-reverse; min-width:3px; }
+  .legend span { margin-right:12px; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
+  #events { font:12px/1.5 ui-monospace, Menlo, monospace; max-height:340px; overflow:auto; }
+  #events div { border-bottom:1px dashed var(--line); padding:2px 0; }
+  .kv { display:grid; grid-template-columns: auto 1fr; gap:3px 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Auction cluster monitor</h1>
+  <span class="muted" id="ts">connecting…</span>
+  <span>Shard A primary: <b id="pa">–</b></span>
+  <span>Shard B primary: <b id="pb">–</b></span>
+  <span>Redis: <b id="redis">–</b></span>
+</header>
+<div class="grid">
+  <section><h2>Shard A · auction DB <span id="aSince" class="muted"></span></h2><div id="shardA" class="scroll"></div></section>
+  <section><h2>Shard B · wallet DB <span id="bSince" class="muted"></span></h2><div id="shardB" class="scroll"></div></section>
+  <section><h2>App nodes</h2><div id="apps" class="scroll"></div></section>
+  <section><h2>Load balancing <span class="muted">HAProxy, last 10 s</span></h2>
+    <div class="stack" id="stack"></div>
+    <div class="legend" id="legend"></div>
+    <div class="bars" id="bars"></div>
+    <div class="muted">requests / second per node, last 30 s</div>
+  </section>
+  <section><h2>Distributed transactions (2PC)</h2><div id="txn"></div></section>
+  <section><h2>Money invariant (wallet shard)</h2><div id="money"></div></section>
+  <section class="wide"><h2>Event log</h2><div id="events"></div></section>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const NODES = ['app1', 'app2', 'app3'], COLORS = { app1: 'var(--n1)', app2: 'var(--n2)', app3: 'var(--n3)' };
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const ago = (t) => t ? Math.round(Date.now() / 1000 - t) + 's' : '';
+
+function shardTable(s) {
+  if (!s) return '';
+  const rep = Object.fromEntries((s.replication || []).map(r => [r.name, r]));
+  let h = s.error ? `<div class="bad">${esc(s.error)}</div>` : '';
+  h += '<table><tr><th>member</th><th>role</th><th>state</th><th>TL</th><th>lag</th><th>ms</th></tr>';
+  for (const m of s.members) {
+    const r = rep[m.name] || {};
+    const cls = m.role === 'leader' ? 'ok' : m.role === 'sync_standby' ? '' : 'muted';
+    const lag = m.role === 'leader' ? '' : (r.replay_lag_bytes ?? m.lag ?? '?') + ' B';
+    const lagCls = r.replay_lag_bytes > 0 ? 'warn' : '';
+    h += `<tr><td><b>${esc(m.name)}</b></td><td class="${cls}">${m.role === 'sync_standby' ? 'sync replica' : m.role === 'replica' ? 'async replica' : esc(m.role)}</td>
+      <td class="${m.state === 'running' || m.state === 'streaming' ? '' : 'bad'}">${esc(m.state)}</td><td>${m.timeline ?? ''}</td>
+      <td class="${lagCls}">${lag}</td><td class="muted">${r.replay_lag_ms ?? ''}</td></tr>`;
+  }
+  return h + '</table>';
+}
+
+function render(st) {
+  $('ts').textContent = 'updated ' + new Date(st.ts * 1000).toLocaleTimeString();
+  const A = st.shards.A, B = st.shards.B;
+  $('pa').textContent = A.leader || 'NONE'; $('pa').className = A.leader ? 'ok' : 'bad';
+  $('pb').textContent = B.leader || 'NONE'; $('pb').className = B.leader ? 'ok' : 'bad';
+  $('aSince').textContent = A.leader_since ? 'primary for ' + ago(A.leader_since) : '';
+  $('bSince').textContent = B.leader_since ? 'primary for ' + ago(B.leader_since) : '';
+  $('redis').textContent = st.redis ? 'up' : 'DOWN'; $('redis').className = st.redis ? 'ok' : 'bad';
+  $('shardA').innerHTML = shardTable(A); $('shardB').innerHTML = shardTable(B);
+
+  // App nodes
+  let h = '<table><tr><th>node</th><th>LB</th><th>ready</th><th>writes</th><th>live</th><th>ws</th><th>req/s</th></tr>';
+  for (const n of NODES) {
+    const a = st.apps[n] || {}, hp = (st.haproxy || {})[n] || {};
+    const lb = hp.status || '?';
+    h += `<tr><td><span class="dot" style="background:${COLORS[n]}"></span><b>${n}</b></td>
+      <td><span class="pill ${lb.startsWith('UP') ? 'ok' : 'bad'}">${esc(lb)}</span></td>
+      <td class="${a.ready ? 'ok' : 'bad'}">${a.up ? (a.ready ? 'yes' : 'no') : 'down'}</td>
+      <td class="${a.writes ? 'ok' : 'warn'}">${a.up ? (a.writes ? 'yes' : 'no primary') : ''}</td>
+      <td class="${a.realtime === 'push' ? 'ok' : 'warn'}">${a.realtime || ''}</td><td>${a.ws_clients ?? ''}</td><td>${hp.rps ?? ''}</td></tr>`;
+  }
+  $('apps').innerHTML = h + '</table>';
+
+  // LB distribution
+  const tot = NODES.reduce((s, n) => s + ((st.haproxy || {})[n]?.last10s || 0), 0);
+  $('stack').innerHTML = NODES.map(n => { const v = (st.haproxy || {})[n]?.last10s || 0, p = tot ? 100 * v / tot : 0;
+    return `<div style="width:${p}%;background:${COLORS[n]}">${p >= 8 ? Math.round(p) + '%' : ''}</div>`; }).join('');
+  $('legend').innerHTML = NODES.map(n => `<span><span class="dot" style="background:${COLORS[n]}"></span>${n} ${(st.haproxy || {})[n]?.last10s || 0}</span>`).join('') + `<span class="muted">total ${tot}</span>`;
+  const hist = st.req_history || [], max = Math.max(1, ...hist.map(x => NODES.reduce((s, n) => s + (x[n] || 0), 0)));
+  $('bars').innerHTML = hist.map(x => `<div class="col">${NODES.map(n => `<div style="height:${70 * (x[n] || 0) / max}px;background:${COLORS[n]}"></div>`).join('')}</div>`).join('');
+
+  // 2PC
+  const tl = A.txn_log || {};
+  const pend = Object.values(tl).reduce((s, v) => s + v.pending, 0);
+  $('txn').innerHTML = `<div class="kv">
+    ${['INIT', 'PREPARED', 'COMMITTED', 'ABORTED'].map(k => `<span>${k}</span><b class="${k === 'COMMITTED' ? 'ok' : k === 'ABORTED' ? 'warn' : ''}">${tl[k]?.n ?? 0}</b>`).join('')}
+    <span>phase 2 pending</span><b class="${pend ? 'warn' : ''}">${pend}</b>
+    <span>prepared xacts A / B</span><b class="${(A.prepared_xacts || B.prepared_xacts) ? 'warn' : ''}">${A.prepared_xacts ?? '?'} / ${B.prepared_xacts ?? '?'}</b>
+    <span>bids stored</span><b>${A.bids ?? '?'}</b></div>`;
+
+  // Money
+  const m = B.money;
+  if (m) {
+    const okHeld = Math.abs(m.held - m.active) < 0.005;
+    $('money').innerHTML = `<div class="kv">
+      <span>total balance (Σ balance)</span><b class="big">$${m.total.toFixed(2)}</b>
+      <span>total held (Σ held)</span><b>$${m.held.toFixed(2)}</b>
+      <span>active escrow holds</span><b>$${m.active.toFixed(2)}</b>
+      <span>held = active holds</span><b class="${okHeld ? 'ok' : 'bad'}">${okHeld ? '✔ consistent' : '✘ MISMATCH'}</b></div>`;
+  }
+
+  // Events
+  $('events').innerHTML = (st.events || []).slice(0, 120).map(e => {
+    const t = new Date((e.ts || 0) * 1000).toLocaleTimeString();
+    let txt, cls = '';
+    switch (e.type) {
+      case 'bid': txt = `bid $${e.amount} on #${e.item_id} by user ${e.user_id} via ${e.node}`; break;
+      case 'closed': txt = `auction #${e.item_id} ${e.status}${e.winner ? ' → user ' + e.winner + ' $' + e.price : ''} (${e.node})`; cls = 'ok'; break;
+      case 'item_created': txt = `new auction #${e.item_id} "${e.title}" via ${e.node}`; break;
+      case 'primary_change': txt = `SHARD ${e.shard} PRIMARY: ${e.old ?? '–'} → ${e.new ?? 'NONE'}`; cls = e.new ? 'warn' : 'bad'; break;
+      case 'lb_status': txt = `HAProxy: ${e.node} ${e.old} → ${e.new}`; cls = e.new.startsWith('UP') ? 'ok' : 'bad'; break;
+      case 'redis': txt = `redis ${e.status}`; cls = e.status === 'up' ? 'ok' : 'bad'; break;
+      default: txt = JSON.stringify(e); cls = 'muted';
+    }
+    return `<div class="${cls}">${t}  ${esc(txt)}</div>`;
+  }).join('');
+}
+
+async function tick() {
+  try { render(await (await fetch('/api/state')).json()); }
+  catch (e) { $('ts').textContent = 'monitor unreachable: ' + e.message; }
+  setTimeout(tick, 1000);
+}
+tick();
+</script>
+</body>
+</html>

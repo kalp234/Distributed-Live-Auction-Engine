@@ -16,8 +16,8 @@ RUN f=/opt/patroni/lib/python3.11/site-packages/patroni/config.py \
 
 ENV PATH=/opt/patroni/bin:$PATH
 COPY patroni.yml /etc/patroni/patroni.tmpl.yml
-COPY entrypoint.sh post_init.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/post_init.sh
+COPY entrypoint.sh post_init.sh archive_wal.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/post_init.sh /usr/local/bin/archive_wal.sh
 
 EXPOSE 5432 8008
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

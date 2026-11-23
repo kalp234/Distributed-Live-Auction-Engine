@@ -31,7 +31,7 @@ async def read(shard: ShardTopology, sql: str, *args: Any, min_lsn: str | None =
             async with pool.acquire() as conn:
                 if min_lsn:
                     caught_up = await conn.fetchval(
-                        "SELECT pg_last_wal_replay_lsn() >= $1::pg_lsn", min_lsn)
+                        "SELECT pg_last_wal_replay_lsn() >= $1::text::pg_lsn", min_lsn)
                     if not caught_up:
                         fallback = "replica-behind-min-lsn"
                 if fallback is None:

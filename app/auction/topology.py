@@ -25,6 +25,19 @@ log = logging.getLogger("topology")
 EventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
+REPLICATION_SQL = """
+SELECT application_name AS name, state, sync_state,
+       pg_current_wal_lsn()::text AS primary_lsn, replay_lsn::text AS replay_lsn,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), sent_lsn)::bigint   AS sent_lag_bytes,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), flush_lsn)::bigint  AS flush_lag_bytes,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint AS replay_lag_bytes,
+       round(extract(epoch FROM write_lag)  * 1000, 2)::float8 AS write_lag_ms,
+       round(extract(epoch FROM flush_lag)  * 1000, 2)::float8 AS flush_lag_ms,
+       round(extract(epoch FROM replay_lag) * 1000, 2)::float8 AS replay_lag_ms
+FROM pg_stat_replication
+"""
+
+
 class NoPrimaryError(RuntimeError):
     """Raised when a shard currently has no writable primary (e.g. mid-failover)."""
 
@@ -65,6 +78,8 @@ class ShardTopology:
     leader_name: str | None = None
     last_refresh_ok: float = 0.0
     last_error: str | None = None
+    # [T1] Per-replica stats from the primary's pg_stat_replication (true replay lag).
+    replication: dict[str, dict[str, Any]] = field(default_factory=dict)
     _rr: itertools.count = field(default_factory=itertools.count)
     _pool_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     _http: httpx.AsyncClient | None = None
@@ -104,6 +119,7 @@ class ShardTopology:
         self.last_error = None
         leader = next((m.name for m in new.values() if m.is_leader), None)
         await self._set_leader(leader)
+        await self._refresh_replication()
 
         # Drop pools for members that left the cluster.
         for name in list(self.pools):
@@ -120,6 +136,18 @@ class ShardTopology:
             await self._close_pool(old)
         if self.on_event:
             await self.on_event("leader_change", {"shard": self.shard, "old": old, "new": leader})
+
+    async def _refresh_replication(self) -> None:
+        """[T1] Ask the primary how far each replica has received/flushed/replayed."""
+        if self.leader_name is None:
+            self.replication = {}
+            return
+        try:
+            _, pool = await self.primary()
+            rows = await pool.fetch(REPLICATION_SQL, timeout=1.0)
+            self.replication = {r["name"]: dict(r) for r in rows}
+        except Exception as e:
+            self.last_error = f"pg_stat_replication: {e!r}"
 
     async def run(self, interval: float) -> None:
         while True:
@@ -160,11 +188,22 @@ class ShardTopology:
             raise NoPrimaryError(f"shard {self.shard} has no primary right now")
         return self.leader_name, await self._pool(self.leader_name)
 
+    def replay_lag(self, name: str) -> int | None:
+        r = self.replication.get(name)
+        return None if r is None or r["replay_lag_bytes"] is None else int(r["replay_lag_bytes"])
+
     def read_candidates(self) -> list[Member]:
-        return [
-            m for m in self.members.values()
-            if m.is_usable_replica and (m.lag is None or m.lag <= self.max_lag_bytes)
-        ]
+        """[T1][T6] Streaming replicas whose replay lag is under the staleness bound."""
+        out = []
+        for m in self.members.values():
+            if not m.is_usable_replica:
+                continue
+            lag = self.replay_lag(m.name)
+            if lag is None:
+                lag = m.lag
+            if lag is None or lag <= self.max_lag_bytes:
+                out.append(m)
+        return out
 
     async def replica(self) -> tuple[str, asyncpg.Pool]:
         """[T6] Read path: round-robin over healthy replicas, primary as last resort."""
@@ -192,6 +231,10 @@ class ShardTopology:
             "members": [
                 {"name": m.name, "role": m.role, "state": m.state, "lag": m.lag, "timeline": m.timeline}
                 for m in sorted(self.members.values(), key=lambda x: x.name)
+            ],
+            "replication": [
+                {k: (str(v) if k.endswith("_lsn") else v) for k, v in r.items()}
+                for r in sorted(self.replication.values(), key=lambda x: x["name"])
             ],
             "read_candidates": [m.name for m in self.read_candidates()],
             "view_age_s": round(time.time() - self.last_refresh_ok, 1) if self.last_refresh_ok else None,

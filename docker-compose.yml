@@ -209,6 +209,19 @@ services:
       - ./infra/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports: ["18080:80", "18404:8404"]
 
+  # -------------------------------------------------------------------------
+  # Monitor dashboard: health, primary, lag, LB distribution, 2PC log, events
+  # -------------------------------------------------------------------------
+  monitor:
+    build: ./monitor
+    image: auction/monitor:latest
+    pull_policy: never
+    restart: unless-stopped
+    depends_on: [haproxy]
+    environment:
+      <<: *app-env
+    ports: ["19000:9000"]
+
   # One-shot seeding (skips if data already exists)
   seed:
     image: auction/tools:latest

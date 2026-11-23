@@ -38,7 +38,7 @@ bootstrap:
         track_commit_timestamp: "on"
         # [T5] Continuous WAL archiving to a volume shared by the shard's members (PITR).
         archive_mode: "on"
-        archive_command: "test ! -f /wal_archive/%f && cp %p /wal_archive/%f"
+        archive_command: "/usr/local/bin/archive_wal.sh %p %f"
         archive_timeout: 30
         shared_buffers: 64MB
         log_min_duration_statement: -1

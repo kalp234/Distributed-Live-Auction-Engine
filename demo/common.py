@@ -130,3 +130,18 @@ def print_cluster(shard: str) -> None:
         col = green if role == "leader" else (cyan if role == "sync_standby" else dim)
         lag = m.get("lag", "")
         info(f"{m['name']:6} {col(f'{role:13}')} {m['state']:10} TL={m.get('timeline')}  lag={lag}")
+
+
+def set_apply_delay(member: str, delay: str | None, db: str = "auction") -> None:
+    """Turn a replica into a *delayed* replica (recovery_min_apply_delay) or back.
+
+    Patroni owns recovery parameters (it strips them from postgresql.auto.conf), so this is
+    done the Patroni way: edit that member's local patroni.yml and SIGHUP Patroni (PID 1).
+    The setting is not persistent: the entrypoint re-renders patroni.yml on restart."""
+    cmd = "sed -i '/recovery_min_apply_delay/d' /etc/patroni/patroni.yml"
+    if delay:
+        cmd += f" && sed -i 's|^  recovery_conf:|  recovery_conf:\\n    recovery_min_apply_delay: {delay}|' /etc/patroni/patroni.yml"
+    dexec(member, "sh", "-c", cmd + " && kill -HUP 1")
+    want = delay or "0"
+    wait_for(lambda: psql(member, db, "SHOW recovery_min_apply_delay").strip() == want, 15, 0.3,
+             f"{member} recovery_min_apply_delay={want}")

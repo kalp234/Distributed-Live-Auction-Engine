@@ -16,6 +16,7 @@ make down     # stop (keeps data)   |   make clean  # stop and delete all data
 | URL | What |
 |-----|------|
 | http://localhost:18080 | App (via HAProxy) |
+| http://localhost:19000 | Cluster monitor dashboard |
 | http://localhost:18404/stats | HAProxy stats |
 
 > Full documentation (architecture diagram, per-topic walkthrough, demo outputs) lands in milestone M9.

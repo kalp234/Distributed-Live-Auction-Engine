@@ -130,6 +130,16 @@ async def place_bid(item_id: int, body: PlaceBid, response: Response,
 
 
 # ----------------------------------------------------------------------------- status
+@router.get("/api/replication")
+async def replication() -> dict[str, Any]:
+    """[T1] Replication lag per replica (bytes + ms) from the primaries' pg_stat_replication."""
+    await rt.shard_a._refresh_replication()  # live values, not the 1 s cache
+    await rt.shard_b._refresh_replication()
+    return {"node": settings.node_id,
+            "shards": {s.shard: {"leader": s.leader_name, "replicas": s.snapshot()["replication"]}
+                       for s in (rt.shard_a, rt.shard_b)}}
+
+
 @router.get("/api/node")
 async def node() -> dict[str, Any]:
     return {"node": settings.node_id, "realtime": rt.hub.snapshot(),
