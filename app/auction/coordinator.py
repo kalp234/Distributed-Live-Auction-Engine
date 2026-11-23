@@ -87,7 +87,14 @@ class TwoPhaseCommit:
     # ------------------------------------------------------------------ participants
     async def _prepare(self, shard: ShardTopology, txn_id: uuid.UUID, work: Work) -> Any:
         """Phase 1 on one participant: run `work` in a txn and PREPARE it (vote yes)."""
-        _, pool = await shard.primary()
+        member, pool = await shard.primary()
+        try:
+            return await self._prepare_on(pool, shard, txn_id, work)
+        except TRANSIENT:
+            shard.report(member, False)  # [T2] feeds the primary's circuit breaker
+            raise
+
+    async def _prepare_on(self, pool: asyncpg.Pool, shard: ShardTopology, txn_id: uuid.UUID, work: Work) -> Any:
         async with pool.acquire() as conn:
             await conn.execute("BEGIN")
             try:

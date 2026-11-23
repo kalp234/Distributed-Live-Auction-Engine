@@ -20,6 +20,8 @@ from typing import Any, Awaitable, Callable
 import asyncpg
 import httpx
 
+from .resilience import CircuitBreaker
+
 log = logging.getLogger("topology")
 
 EventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -84,6 +86,10 @@ class ShardTopology:
     last_error: str | None = None
     # [T1] Per-replica stats from the primary's pg_stat_replication (true replay lag).
     replication: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # [T2] One circuit breaker per member: a dead replica leaves read rotation after 2
+    # failed connections instead of costing every read a connect timeout until Patroni
+    # notices (its member key only expires after ttl).
+    breakers: dict[str, CircuitBreaker] = field(default_factory=dict)
     _rr: itertools.count = field(default_factory=itertools.count)
     _pool_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     _http: httpx.AsyncClient | None = None
@@ -130,9 +136,23 @@ class ShardTopology:
             if name not in new:
                 await self._close_pool(name)
 
+    def breaker(self, name: str) -> CircuitBreaker:
+        if name not in self.breakers:
+            self.breakers[name] = CircuitBreaker(f"{self.shard}/{name}")
+        return self.breakers[name]
+
+    def report(self, name: str | None, ok: bool) -> None:
+        """Callers report connection-level success/failure against a member."""
+        if name is None:
+            return
+        b = self.breaker(name)
+        b.success() if ok else b.failure()
+
     async def _set_leader(self, leader: str | None) -> None:
         if leader == self.leader_name:
             return
+        if leader is not None:
+            self.breaker(leader).success()  # fresh start for a newly promoted primary
         old, self.leader_name = self.leader_name, leader
         log.warning("shard %s leader change: %s -> %s", self.shard, old, leader)
         if old is not None and old in self.pools:
@@ -173,12 +193,16 @@ class ShardTopology:
             if name in pools:
                 return pools[name]
             m = self.members[name]
-            pool = await asyncpg.create_pool(
-                host=m.host, port=m.port, user=self.user, password=self.password,
-                database=self.database, min_size=1, max_size=6 if control else 20,
-                timeout=2.0, command_timeout=15.0,
-                server_settings={"application_name": f"auction-{self.shard}{'-ctl' if control else ''}"},
-            )
+            try:
+                pool = await asyncpg.create_pool(
+                    host=m.host, port=m.port, user=self.user, password=self.password,
+                    database=self.database, min_size=1, max_size=6 if control else 20,
+                    timeout=2.0, command_timeout=15.0,
+                    server_settings={"application_name": f"auction-{self.shard}{'-ctl' if control else ''}"},
+                )
+            except (OSError, asyncio.TimeoutError, asyncpg.PostgresError):
+                self.report(name, False)
+                raise
             pools[name] = pool
             return pool
 
@@ -192,6 +216,8 @@ class ShardTopology:
         """[T6] Write path: always the current leader."""
         if self.leader_name is None or self.leader_name not in self.members:
             raise NoPrimaryError(f"shard {self.shard} has no primary right now")
+        if not self.breaker(self.leader_name).allow():
+            raise NoPrimaryError(f"shard {self.shard} primary {self.leader_name}: circuit open")
         return self.leader_name, await self._pool(self.leader_name)
 
     async def primary_control(self) -> tuple[str, asyncpg.Pool]:
@@ -219,7 +245,7 @@ class ShardTopology:
 
     async def replica(self) -> tuple[str, asyncpg.Pool]:
         """[T6] Read path: round-robin over healthy replicas, primary as last resort."""
-        cands = self.read_candidates()
+        cands = [m for m in self.read_candidates() if self.breaker(m.name).allow()]
         for _ in range(len(cands)):
             m = cands[next(self._rr) % len(cands)]
             try:
@@ -249,6 +275,7 @@ class ShardTopology:
                 for r in sorted(self.replication.values(), key=lambda x: x["name"])
             ],
             "read_candidates": [m.name for m in self.read_candidates()],
+            "breakers": {n: b.snapshot() for n, b in sorted(self.breakers.items())},
             "view_age_s": round(time.time() - self.last_refresh_ok, 1) if self.last_refresh_ok else None,
             "error": self.last_error,
         }

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -11,10 +12,12 @@ from fastapi import APIRouter, Header, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from . import db, faults, recovery
-from .coordinator import stats as tpc_stats
 from .bidding import place_bid as do_bid
 from .config import settings
+from .coordinator import TRANSIENT
+from .coordinator import stats as tpc_stats
 from .errors import AppError
+from .resilience import retry
 from .runtime import rt
 
 log = logging.getLogger("api")
@@ -115,6 +118,12 @@ async def create_item(body: CreateItem, response: Response,
     return item
 
 
+def _retryable(e: BaseException) -> bool:
+    if isinstance(e, AppError):
+        return e.code in ("outcome_unknown", "aborted_by_recovery")
+    return isinstance(e, TRANSIENT)
+
+
 class PlaceBid(BaseModel):
     amount: float = Field(gt=0)
 
@@ -123,11 +132,25 @@ class PlaceBid(BaseModel):
 async def place_bid(item_id: int, body: PlaceBid, response: Response,
                     x_user_id: int = Header(),
                     idempotency_key: str | None = Header(default=None)) -> dict[str, Any]:
-    result = await do_bid(item_id, x_user_id, Decimal(str(body.amount)), idempotency_key)
+    # [T2] Retry transient failures (primary briefly unreachable, connection reset, outcome
+    # unknown) with backoff. Safe because of the idempotency key: a retry of an attempt that
+    # actually committed returns the original bid instead of creating a second one.
+    key = idempotency_key or f"auto-{uuid.uuid4()}"
+    result = await retry(lambda: do_bid(item_id, x_user_id, Decimal(str(body.amount)), key),
+                         attempts=3, base_delay=0.2, retry_if=_retryable, what="place_bid")
     response.headers["X-DB-Node"] = result.pop("_db_node", "")
     if lsn := result.pop("_lsn", None):
         response.headers["X-Write-LSN"] = lsn
     return result
+
+
+@router.get("/api/live")
+async def live_board(response: Response) -> dict[str, Any]:
+    """Cheap polling endpoint: live board from Redis, or from the DB if Redis is down [T2]."""
+    board = await rt.hub.read_board()
+    if board is not None:
+        return {"source": "redis", "items": board}
+    return {"source": "db", "items": await db.load_board(rt.shard_a)}
 
 
 # ----------------------------------------------------------------------------- status

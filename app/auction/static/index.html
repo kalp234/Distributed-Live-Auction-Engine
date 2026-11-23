@@ -201,6 +201,8 @@ function handleEvent(ev) {
   switch (ev.type) {
     case 'hello': state.wsNode = ev.node; $('wsNode').textContent = ev.node; setMode(ev.mode); log(`connected to ${ev.node} (${ev.mode})`, 'ok'); loadItems(); break;
     case 'mode': setMode(ev.mode); log(`${ev.node}: realtime mode → ${ev.mode}`, ev.mode === 'push' ? 'ok' : 'warn'); break;
+    case 'resync': log(`${ev.node}: redis back — resyncing state from the database`, 'ok'); loadItems(); if (state.selected) select(state.selected); break;
+    case 'recovery': log(`resolver finished ${ev.actions.length} in-doubt txn part(s): ` + ev.actions.map(a => a.decision + ' ' + a.txn_id.slice(0, 8) + '@' + a.shard).join(', '), 'warn'); break;
     case 'bid': {
       const it = state.items.get(ev.item_id);
       const u = state.users.find(u => u.id === ev.user_id);

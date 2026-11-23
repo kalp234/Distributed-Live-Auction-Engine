@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -35,12 +36,21 @@ async def read(shard: ShardTopology, sql: str, *args: Any, min_lsn: str | None =
                     if not caught_up:
                         fallback = "replica-behind-min-lsn"
                 if fallback is None:
-                    return ReadResult(await conn.fetch(sql, *args), name, None)
-        except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError) as e:
+                    rows = await conn.fetch(sql, *args)
+                    shard.report(name, True)
+                    return ReadResult(rows, name, None)
+        except (OSError, asyncio.TimeoutError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError,
+                asyncpg.CannotConnectNowError, asyncpg.AdminShutdownError) as e:
+            shard.report(name, False)  # [T2] trip this replica's breaker; fall back below
             fallback = f"replica-error:{type(e).__name__}"
     pname, ppool = await shard.primary()
-    async with ppool.acquire() as conn:
-        return ReadResult(await conn.fetch(sql, *args), pname, fallback)
+    try:
+        async with ppool.acquire() as conn:
+            rows = await conn.fetch(sql, *args)
+    except (OSError, asyncio.TimeoutError, asyncpg.PostgresConnectionError, asyncpg.InterfaceError):
+        shard.report(pname, False)
+        raise
+    return ReadResult(rows, pname, fallback)
 
 
 @asynccontextmanager
@@ -52,3 +62,10 @@ async def write_conn(shard: ShardTopology) -> AsyncIterator[tuple[str, asyncpg.C
 
 async def current_lsn(conn: asyncpg.Connection) -> str:
     return str(await conn.fetchval("SELECT pg_current_wal_lsn()::text"))
+
+
+async def load_board(shard: ShardTopology) -> dict[str, dict[str, Any]]:
+    """Live board (open items' current state) straight from the database (source of truth)."""
+    r = await read(shard, "SELECT id, current_price, highest_bidder, version FROM items WHERE status = 'open'")
+    return {str(x["id"]): {"price": float(x["current_price"]), "bidder": x["highest_bidder"], "version": x["version"]}
+            for x in r.rows}

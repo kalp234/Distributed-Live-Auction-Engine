@@ -116,7 +116,9 @@ class LoadGen:
                     await asyncio.sleep(0.25 * (attempt + 1))
                 if r is not None and r.status_code == 200:
                     body = r.json()
-                    if body.get("status") == "accepted":
+                    # "duplicate" = an earlier attempt of this request committed (its response
+                    # was lost) — still exactly one committed bid.
+                    if body.get("status") in ("accepted", "duplicate"):
                         self._bucket().bids_ok += 1
                         self.total.bids_ok += 1
                         self.accepted_bids.append(body)

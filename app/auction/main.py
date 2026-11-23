@@ -12,7 +12,7 @@ import asyncpg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import recovery
+from . import db, recovery
 from .closer import Closer
 from .api import router
 from .config import settings
@@ -40,7 +40,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                                settings.db_password, settings.max_replica_lag_bytes, on_topology_event)
     rt.shard_b = ShardTopology("B", settings.db_b_name, settings.patroni_b, settings.db_user,
                                settings.db_password, settings.max_replica_lag_bytes, on_topology_event)
-    rt.hub = Hub(settings.node_id, settings.redis_url)
+    rt.hub = Hub(settings.node_id, settings.redis_url, board_loader=lambda: db.load_board(rt.shard_a))
     # First discovery before serving so the node is useful immediately.
     await asyncio.gather(rt.shard_a.refresh(), rt.shard_b.refresh(), return_exceptions=True)
     rt.tasks = [
