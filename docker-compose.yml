@@ -209,12 +209,27 @@ services:
       - ./infra/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports: ["18080:80", "18404:8404"]
 
+  # One-shot seeding (skips if data already exists)
+  seed:
+    image: auction/tools:latest
+    pull_policy: never
+    depends_on:
+      app1: {condition: service_healthy}
+    environment:
+      <<: *app-env
+    volumes:
+      - .:/work
+    working_dir: /work
+    command: ["python", "-m", "demo.seed"]
+    restart: "no"
+
   # -------------------------------------------------------------------------
   # Demo / chaos / test runner (not started by `up`; used via `make demo-*`)
   # -------------------------------------------------------------------------
   tools:
     build: ./tools
     image: auction/tools:latest
+    pull_policy: never
     profiles: ["tools"]
     working_dir: /work
     environment:

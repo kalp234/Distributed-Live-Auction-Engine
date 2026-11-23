@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Auction</title>
+<style>
+  :root { --bg:#0f1220; --panel:#181c2e; --line:#2a3050; --text:#e6e8f2; --muted:#8b91ad;
+          --accent:#5b8cff; --ok:#3ecf8e; --warn:#f5b84b; --bad:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:18px; margin:0 12px 0 0; }
+  .badge { padding:3px 8px; border-radius:999px; background:var(--panel); border:1px solid var(--line); font-size:12px; white-space:nowrap; }
+  .badge b { color:var(--accent); }
+  .ok { color:var(--ok) } .warn { color:var(--warn) } .bad { color:var(--bad) } .muted { color:var(--muted) }
+  main { display:grid; grid-template-columns: 300px 1fr 340px; gap:12px; padding:12px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; min-width:0; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  .item { padding:10px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px; cursor:pointer; }
+  .item.sel { border-color:var(--accent); }
+  .item .row { display:flex; justify-content:space-between; gap:8px; }
+  .price { font-size:28px; font-weight:700; }
+  .flash { animation: flash 0.8s; }
+  @keyframes flash { from { background: rgba(91,140,255,.35); } to { background: transparent; } }
+  input, select, button { font:inherit; color:var(--text); background:#0f1325; border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  button { background:var(--accent); border-color:var(--accent); color:#fff; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--text); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); }
+  #log { font:12px/1.5 ui-monospace, Menlo, monospace; max-height:70vh; overflow:auto; }
+  #log div { border-bottom:1px dashed var(--line); padding:2px 0; word-break:break-word; }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+  #msg { min-height:20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ Live Auction</h1>
+  <label>Bidding as <select id="user"></select></label>
+  <span class="badge">HTTP served by <b id="httpNode">–</b> <span class="muted" id="dbNode"></span></span>
+  <span class="badge">Live feed via <b id="wsNode">–</b> <span id="wsMode" class="muted">connecting…</span></span>
+  <span class="badge" id="wallet">wallet –</span>
+</header>
+<main>
+  <section>
+    <h2>Auctions</h2>
+    <div id="items"></div>
+    <details><summary class="muted">New auction</summary>
+      <div class="controls">
+        <input id="newTitle" placeholder="Title" size="14">
+        <input id="newPrice" type="number" value="100" style="width:80px">
+        <input id="newDur" type="number" value="300" style="width:80px" title="duration (s)">
+        <button onclick="createItem()">Create</button>
+      </div>
+    </details>
+  </section>
+  <section id="detail"><h2>Select an auction</h2></section>
+  <section><h2>Event log</h2><div id="log"></div></section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { items: new Map(), selected: null, users: [], minLsn: null, ws: null, mode: 'connecting', wsNode: null };
+
+function log(text, cls = '') {
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = new Date().toLocaleTimeString() + '  ' + text;
+  $('log').prepend(d);
+  while ($('log').childElementCount > 300) $('log').lastChild.remove();
+}
+
+// --- HTTP helper: shows which node served the request; carries read-your-writes LSN ---
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', 'X-User-Id': $('user').value || '1', ...(opts.headers || {}) };
+  if (state.minLsn && (!opts.method || opts.method === 'GET')) headers['X-Min-LSN'] = state.minLsn;
+  const r = await fetch(path, { ...opts, headers });
+  $('httpNode').textContent = r.headers.get('X-Served-By') || '?';
+  const dbn = r.headers.get('X-DB-Node'), fb = r.headers.get('X-Read-Fallback');
+  $('dbNode').textContent = dbn ? `· db ${dbn}${fb ? ' (' + fb + ')' : ''}` : '';
+  if (r.headers.get('X-Write-LSN')) state.minLsn = r.headers.get('X-Write-LSN');
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(body.message || r.statusText), { status: r.status, body });
+  return body;
+}
+
+function fmtLeft(endsAt) {
+  const s = Math.max(0, Math.round((new Date(endsAt) - Date.now()) / 1000));
+  if (s <= 0) return 'ended';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return (h ? h + 'h ' : '') + m + 'm ' + String(sec).padStart(2, '0') + 's';
+}
+
+function renderItems() {
+  const el = $('items'); el.innerHTML = '';
+  for (const it of state.items.values()) {
+    const d = document.createElement('div');
+    d.className = 'item' + (state.selected === it.id ? ' sel' : '');
+    d.id = 'item-' + it.id;
+    d.onclick = () => select(it.id);
+    d.innerHTML = `<div class="row"><b></b><span class="${it.status === 'open' ? 'ok' : 'muted'}">${it.status}</span></div>
+      <div class="row"><span>$${it.current_price.toFixed(2)}</span><span class="muted cd" data-ends="${it.ends_at}">${it.status === 'open' ? fmtLeft(it.ends_at) : ''}</span></div>
+      <div class="muted">${it.highest_bidder_name ? 'top: ' + it.highest_bidder_name : 'no bids yet'}</div>`;
+    d.querySelector('b').textContent = '#' + it.id + ' ' + it.title;
+    el.appendChild(d);
+  }
+}
+
+async function loadItems() {
+  const items = await api('/api/items');
+  state.items = new Map(items.map(i => [i.id, i]));
+  renderItems();
+}
+
+async function loadUsers() {
+  const users = await api('/api/users');
+  state.users = users;
+  const sel = $('user'), cur = sel.value;
+  sel.innerHTML = users.map(u => `<option value="${u.id}">${u.id} · ${u.name}</option>`).join('');
+  sel.value = cur || '3';  // default to a bidder (users 1-2 are the seed sellers)
+  showWallet();
+}
+
+function showWallet() {
+  const u = state.users.find(u => String(u.id) === $('user').value);
+  $('wallet').textContent = u && u.balance != null ? `wallet $${u.balance.toFixed(2)} · held $${u.held.toFixed(2)} · free $${(u.balance - u.held).toFixed(2)}` : 'wallet –';
+}
+
+async function select(id) {
+  state.selected = id;
+  renderItems();
+  const it = await api('/api/items/' + id);
+  state.items.set(id, { ...state.items.get(id), ...it });
+  renderDetail(it);
+}
+
+function renderDetail(it) {
+  const next = Math.ceil(((it.bids.length ? it.current_price + 1 : it.start_price)) );
+  $('detail').innerHTML = `<h2>#${it.id} · <span id="dTitle"></span></h2>
+    <div class="price" id="dPrice">$${it.current_price.toFixed(2)}</div>
+    <div class="muted">${it.highest_bidder_name ? 'highest bidder: <b>' + it.highest_bidder_name + '</b>' : 'no bids yet — start price $' + it.start_price.toFixed(2)}
+      · ${it.status} · <span class="cd" data-ends="${it.ends_at}">${it.status === 'open' ? fmtLeft(it.ends_at) : ''}</span> · v${it.version}</div>
+    <div class="controls">
+      <input id="amount" type="number" step="1" value="${next}" style="width:120px">
+      <button onclick="bid()" ${it.status !== 'open' ? 'disabled' : ''}>Place bid</button>
+      <button class="secondary" onclick="$('amount').value = Math.ceil(+$('amount').value + 10)">+10</button>
+    </div>
+    <div id="msg"></div>
+    <table><thead><tr><th>Amount</th><th>Bidder</th><th>Via</th><th>Time</th></tr></thead><tbody>
+      ${it.bids.map(b => `<tr><td>$${b.amount.toFixed(2)}</td><td>${b.user_name}</td><td class="muted">${b.served_by || ''}</td><td class="muted">${new Date(b.ts).toLocaleTimeString()}</td></tr>`).join('')}
+    </tbody></table>`;
+  $('dTitle').textContent = it.title;
+}
+
+// --- Bid: idempotency key generated once per click and reused on retry [T4] ---
+async function bid() {
+  const id = state.selected, amount = +$('amount').value, key = crypto.randomUUID();
+  $('msg').textContent = 'placing bid…';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await api(`/api/items/${id}/bids`, { method: 'POST', body: JSON.stringify({ amount }), headers: { 'Idempotency-Key': key } });
+      $('msg').innerHTML = `<span class="ok">✔ ${r.status}</span> <span class="muted">txn ${String(r.txn_id).slice(0, 8)} via ${$('httpNode').textContent}</span>`;
+      if (state.mode !== 'push') await select(id);
+      loadUsers();
+      return;
+    } catch (e) {
+      if (e.status && e.status < 500) { $('msg').innerHTML = `<span class="bad">✘ ${e.message}</span>`; return; }
+      $('msg').innerHTML = `<span class="warn">retry ${attempt}: ${e.message}</span>`;
+      await new Promise(r => setTimeout(r, 500 * attempt));
+    }
+  }
+}
+
+async function createItem() {
+  const it = await api('/api/items', { method: 'POST', body: JSON.stringify({ title: $('newTitle').value || 'Untitled', start_price: +$('newPrice').value, duration_s: +$('newDur').value }) });
+  await loadItems(); select(it.id);
+}
+
+// --- Live feed: WebSocket through HAProxy; any node's events arrive via Redis fan-out [T6] ---
+function connectWs(delay = 500) {
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  state.ws = ws;
+  ws.onmessage = (m) => handleEvent(JSON.parse(m.data));
+  ws.onopen = () => { delay = 500; };
+  ws.onclose = () => {
+    setMode('disconnected');
+    log('live feed disconnected — reconnecting', 'warn');
+    setTimeout(() => connectWs(Math.min(delay * 2, 5000)), delay);
+  };
+}
+setInterval(() => state.ws && state.ws.readyState === 1 && state.ws.send('ping'), 15000);
+
+function setMode(mode) {
+  state.mode = mode;
+  $('wsMode').textContent = mode === 'push' ? 'push (redis)' : mode;
+  $('wsMode').className = mode === 'push' ? 'ok' : 'warn';
+}
+
+function handleEvent(ev) {
+  switch (ev.type) {
+    case 'hello': state.wsNode = ev.node; $('wsNode').textContent = ev.node; setMode(ev.mode); log(`connected to ${ev.node} (${ev.mode})`, 'ok'); loadItems(); break;
+    case 'mode': setMode(ev.mode); log(`${ev.node}: realtime mode → ${ev.mode}`, ev.mode === 'push' ? 'ok' : 'warn'); break;
+    case 'bid': {
+      const it = state.items.get(ev.item_id);
+      const u = state.users.find(u => u.id === ev.user_id);
+      log(`bid $${ev.amount} on #${ev.item_id} by ${u ? u.name : ev.user_id} (via ${ev.node})`);
+      if (it && (it.version ?? -1) < ev.version) {
+        Object.assign(it, { current_price: ev.amount, highest_bidder: ev.user_id, highest_bidder_name: u ? u.name : String(ev.user_id), version: ev.version });
+        renderItems();
+        const card = $('item-' + ev.item_id); if (card) card.classList.add('flash');
+      }
+      if (state.selected === ev.item_id) select(ev.item_id).then(() => $('dPrice') && $('dPrice').classList.add('flash'));
+      break;
+    }
+    case 'item_created': log(`new auction #${ev.item.id} "${ev.item.title}" (via ${ev.node})`); loadItems(); break;
+    case 'closed': log(`auction #${ev.item_id} ${ev.status}${ev.winner ? ' to user ' + ev.winner + ' for $' + ev.price : ''}`, 'ok'); loadItems(); loadUsers(); if (state.selected === ev.item_id) select(ev.item_id); break;
+    case 'leader_change': log(`shard ${ev.shard} primary changed: ${ev.old} → ${ev.new} (seen by ${ev.node})`, 'warn'); break;
+    default: log(JSON.stringify(ev), 'muted');
+  }
+}
+
+// Countdown ticker + polling fallback when live push is unavailable [T2]
+setInterval(() => document.querySelectorAll('.cd').forEach(e => { if (e.textContent) e.textContent = fmtLeft(e.dataset.ends); }), 1000);
+setInterval(async () => {
+  if (state.mode === 'push') return;
+  try { await loadItems(); if (state.selected) await select(state.selected); } catch (e) { log('poll failed: ' + e.message, 'bad'); }
+}, 2000);
+
+$('user').onchange = showWallet;
+(async () => {
+  try { await loadUsers(); await loadItems(); const first = [...state.items.values()].find(i => i.status === 'open'); if (first) select(first.id); }
+  catch (e) { log('initial load failed: ' + e.message, 'bad'); }
+  connectWs();
+})();
+</script>
+</body>
+</html>

@@ -5,51 +5,60 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncIterator
 
+import asyncpg
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
+from . import closer
+from .api import router
 from .config import settings
-from .topology import ShardTopology
+from .errors import AppError
+from .realtime import Hub
+from .runtime import rt
+from .topology import NoPrimaryError, ShardTopology
 
 logging.basicConfig(level=logging.INFO, format=f"%(asctime)s {settings.node_id} %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("main")
 
 STARTED_AT = time.time()
+STATIC = Path(__file__).parent / "static"
 
 
-class State:
-    shard_a: ShardTopology
-    shard_b: ShardTopology
-    tasks: list[asyncio.Task[Any]]
-
-
-state = State()
+async def on_topology_event(kind: str, data: dict[str, Any]) -> None:
+    """Forward DB topology changes (e.g. a new primary) to live clients + dashboard."""
+    if hasattr(rt, "hub"):
+        await rt.hub.broadcast_local({"type": kind, **data, "node": settings.node_id, "ts": time.time()})
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    state.shard_a = ShardTopology("A", settings.db_a_name, settings.patroni_a,
-                                  settings.db_user, settings.db_password, settings.max_replica_lag_bytes)
-    state.shard_b = ShardTopology("B", settings.db_b_name, settings.patroni_b,
-                                  settings.db_user, settings.db_password, settings.max_replica_lag_bytes)
-    # First discovery synchronously so the node is useful as soon as it's up.
-    await asyncio.gather(state.shard_a.refresh(), state.shard_b.refresh(), return_exceptions=True)
-    state.tasks = [
-        asyncio.create_task(state.shard_a.run(settings.topology_interval)),
-        asyncio.create_task(state.shard_b.run(settings.topology_interval)),
+    rt.shard_a = ShardTopology("A", settings.db_a_name, settings.patroni_a, settings.db_user,
+                               settings.db_password, settings.max_replica_lag_bytes, on_topology_event)
+    rt.shard_b = ShardTopology("B", settings.db_b_name, settings.patroni_b, settings.db_user,
+                               settings.db_password, settings.max_replica_lag_bytes, on_topology_event)
+    rt.hub = Hub(settings.node_id, settings.redis_url)
+    # First discovery before serving so the node is useful immediately.
+    await asyncio.gather(rt.shard_a.refresh(), rt.shard_b.refresh(), return_exceptions=True)
+    rt.tasks = [
+        asyncio.create_task(rt.shard_a.run(settings.topology_interval)),
+        asyncio.create_task(rt.shard_b.run(settings.topology_interval)),
+        asyncio.create_task(rt.hub.run()),
+        asyncio.create_task(closer.run()),
     ]
     log.info("node %s started; A leader=%s B leader=%s", settings.node_id,
-             state.shard_a.leader_name, state.shard_b.leader_name)
+             rt.shard_a.leader_name, rt.shard_b.leader_name)
     yield
-    for t in state.tasks:
+    for t in rt.tasks:
         t.cancel()
-    await state.shard_a.close()
-    await state.shard_b.close()
+    await rt.shard_a.close()
+    await rt.shard_b.close()
 
 
 app = FastAPI(title="Distributed Live Auction Engine", lifespan=lifespan)
+app.include_router(router)
 
 
 @app.middleware("http")
@@ -58,6 +67,26 @@ async def served_by(request: Request, call_next: Any) -> Response:
     response: Response = await call_next(request)
     response.headers["X-Served-By"] = settings.node_id
     return response
+
+
+@app.exception_handler(AppError)
+async def app_error(_: Request, e: AppError) -> JSONResponse:
+    return JSONResponse({"error": e.code, "message": e.message, "node": settings.node_id}, status_code=e.status)
+
+
+@app.exception_handler(NoPrimaryError)
+async def no_primary(_: Request, e: NoPrimaryError) -> JSONResponse:
+    # [T3] Mid-failover: writes are briefly unavailable; tell the client to retry.
+    return JSONResponse({"error": "no_primary", "message": str(e), "node": settings.node_id},
+                        status_code=503, headers={"Retry-After": "1"})
+
+
+@app.exception_handler(asyncpg.PostgresError)
+@app.exception_handler(OSError)
+async def db_error(_: Request, e: Exception) -> JSONResponse:
+    log.warning("db error: %r", e)
+    return JSONResponse({"error": "db_unavailable", "message": f"{type(e).__name__}: {e}",
+                         "node": settings.node_id}, status_code=503, headers={"Retry-After": "1"})
 
 
 @app.get("/healthz")
@@ -71,31 +100,23 @@ async def readyz() -> Response:
     """[T6] Readiness for HAProxy. Ready = can serve at least reads from Shard A.
     A primary failover does NOT make nodes unready (reads keep flowing from replicas [T3]);
     write availability is reported separately."""
-    a, b = state.shard_a, state.shard_b
+    a, b = rt.shard_a, rt.shard_b
     body = {
         "node": settings.node_id,
         "ready": a.readable,
         "writes_available": a.leader_name is not None and b.leader_name is not None,
         "shard_a_leader": a.leader_name,
         "shard_b_leader": b.leader_name,
+        "realtime": rt.hub.snapshot()["mode"],
     }
     return JSONResponse(body, status_code=200 if body["ready"] else 503)
 
 
 @app.get("/api/topology")
 async def topology() -> dict[str, Any]:
-    return {"node": settings.node_id, "shards": [state.shard_a.snapshot(), state.shard_b.snapshot()]}
+    return {"node": settings.node_id, "shards": [rt.shard_a.snapshot(), rt.shard_b.snapshot()]}
 
 
-@app.get("/api/whoami")
-async def whoami() -> dict[str, Any]:
-    """Round-trips to the Shard A primary and one replica; shows routing in action."""
-    out: dict[str, Any] = {"node": settings.node_id}
-    for label, getter in (("primary", state.shard_a.primary), ("replica", state.shard_a.replica)):
-        try:
-            name, pool = await getter()
-            row = await pool.fetchrow("SELECT inet_server_addr()::text AS addr, pg_is_in_recovery() AS in_recovery")
-            out[label] = {"member": name, "in_recovery": row["in_recovery"]}
-        except Exception as e:
-            out[label] = {"error": str(e)}
-    return out
+@app.get("/")
+async def index() -> FileResponse:
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
