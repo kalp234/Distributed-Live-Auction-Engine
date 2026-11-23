@@ -2,4 +2,7 @@ httpx==0.28.1
 asyncpg==0.30.0
 websockets==14.1
 pytest==8.3.4
-pytest-asyncio==0.25.0
+pytest-asyncio==0.26.0
+# app dependencies, so unit tests can import the app package
+fastapi==0.115.6
+redis==5.2.1

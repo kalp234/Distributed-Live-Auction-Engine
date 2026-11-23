@@ -75,6 +75,10 @@ class ShardTopology:
 
     members: dict[str, Member] = field(default_factory=dict)
     pools: dict[str, asyncpg.Pool] = field(default_factory=dict)
+    # Separate small pools for 2PC control traffic (txn_log CAS, COMMIT/ROLLBACK PREPARED,
+    # resolver). Without them, requests blocked on a row lock can occupy every connection
+    # while the lock holder needs one more connection to finish -> pool deadlock.
+    ctl_pools: dict[str, asyncpg.Pool] = field(default_factory=dict)
     leader_name: str | None = None
     last_refresh_ok: float = 0.0
     last_error: str | None = None
@@ -122,7 +126,7 @@ class ShardTopology:
         await self._refresh_replication()
 
         # Drop pools for members that left the cluster.
-        for name in list(self.pools):
+        for name in set(self.pools) | set(self.ctl_pools):
             if name not in new:
                 await self._close_pool(name)
 
@@ -159,34 +163,42 @@ class ShardTopology:
             await asyncio.sleep(interval)
 
     # ------------------------------------------------------------------ pools
-    async def _pool(self, name: str) -> asyncpg.Pool:
-        pool = self.pools.get(name)
+    async def _pool(self, name: str, control: bool = False) -> asyncpg.Pool:
+        pools = self.ctl_pools if control else self.pools
+        pool = pools.get(name)
         if pool is not None:
             return pool
-        lock = self._pool_locks.setdefault(name, asyncio.Lock())
+        lock = self._pool_locks.setdefault(f"{name}:{control}", asyncio.Lock())
         async with lock:
-            if name in self.pools:
-                return self.pools[name]
+            if name in pools:
+                return pools[name]
             m = self.members[name]
             pool = await asyncpg.create_pool(
                 host=m.host, port=m.port, user=self.user, password=self.password,
-                database=self.database, min_size=1, max_size=20,
-                timeout=2.0, command_timeout=10.0,
-                server_settings={"application_name": f"auction-{self.shard}"},
+                database=self.database, min_size=1, max_size=6 if control else 20,
+                timeout=2.0, command_timeout=15.0,
+                server_settings={"application_name": f"auction-{self.shard}{'-ctl' if control else ''}"},
             )
-            self.pools[name] = pool
+            pools[name] = pool
             return pool
 
     async def _close_pool(self, name: str) -> None:
-        pool = self.pools.pop(name, None)
-        if pool is not None:
-            pool.terminate()
+        for pools in (self.pools, self.ctl_pools):
+            pool = pools.pop(name, None)
+            if pool is not None:
+                pool.terminate()
 
     async def primary(self) -> tuple[str, asyncpg.Pool]:
         """[T6] Write path: always the current leader."""
         if self.leader_name is None or self.leader_name not in self.members:
             raise NoPrimaryError(f"shard {self.shard} has no primary right now")
         return self.leader_name, await self._pool(self.leader_name)
+
+    async def primary_control(self) -> tuple[str, asyncpg.Pool]:
+        """[T4] Pool reserved for 2PC control statements on the current primary."""
+        if self.leader_name is None or self.leader_name not in self.members:
+            raise NoPrimaryError(f"shard {self.shard} has no primary right now")
+        return self.leader_name, await self._pool(self.leader_name, control=True)
 
     def replay_lag(self, name: str) -> int | None:
         r = self.replication.get(name)
@@ -217,7 +229,7 @@ class ShardTopology:
         return await self.primary()
 
     async def close(self) -> None:
-        for name in list(self.pools):
+        for name in set(self.pools) | set(self.ctl_pools):
             await self._close_pool(name)
         if self._http:
             await self._http.aclose()

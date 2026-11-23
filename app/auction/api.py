@@ -10,7 +10,8 @@ from typing import Any
 from fastapi import APIRouter, Header, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from . import db
+from . import db, faults, recovery
+from .coordinator import stats as tpc_stats
 from .bidding import place_bid as do_bid
 from .config import settings
 from .errors import AppError
@@ -143,7 +144,55 @@ async def replication() -> dict[str, Any]:
 @router.get("/api/node")
 async def node() -> dict[str, Any]:
     return {"node": settings.node_id, "realtime": rt.hub.snapshot(),
+            "two_pc": {"committed": tpc_stats.committed, "aborted": tpc_stats.aborted,
+                       "phase2_deferred": tpc_stats.phase2_deferred, "abort_reasons": tpc_stats.by_reason},
+            "faults": faults.armed(),
             "shards": [rt.shard_a.snapshot(), rt.shard_b.snapshot()]}
+
+
+@router.get("/api/txn/{txn_id}")
+async def txn(txn_id: str) -> dict[str, Any]:
+    """[T4][T5] Coordinator log entry + whether each participant still holds it prepared."""
+    _, pa = await rt.shard_a.primary()
+    row = await pa.fetchrow("SELECT txn_id, kind, state, participants, coordinator, detail, completed, ts, updated_at"
+                            " FROM coord.txn_log WHERE txn_id = $1::uuid", txn_id)
+    if row is None:
+        raise AppError(404, "not_found", "unknown txn")
+    out = dict(row)
+    out["detail"] = json.loads(out["detail"]) if isinstance(out["detail"], str) else out["detail"]
+    for s in (rt.shard_a, rt.shard_b):
+        _, p = await s.primary()
+        out[f"prepared_on_{s.shard}"] = bool(await p.fetchval(
+            "SELECT count(*) FROM pg_prepared_xacts WHERE gid = $1", f"auc:{txn_id}:{s.shard}"))
+    return out
+
+
+# ----------------------------------------------------------------------------- admin (demos)
+class FaultReq(BaseModel):
+    name: str
+    count: int = 1
+    arg: float | None = None
+
+
+@router.post("/admin/faults")
+async def arm_fault(body: FaultReq) -> dict[str, Any]:
+    try:
+        faults.arm(body.name, body.count, body.arg)
+    except ValueError as e:
+        raise AppError(400, "bad_fault", str(e))
+    return {"node": settings.node_id, "armed": faults.armed()}
+
+
+@router.delete("/admin/faults")
+async def clear_faults() -> dict[str, Any]:
+    faults.clear()
+    return {"node": settings.node_id, "armed": {}}
+
+
+@router.post("/admin/recover")
+async def recover_now() -> dict[str, Any]:
+    """Run one resolver pass immediately (ignores the grace period for this node's txns)."""
+    return {"node": settings.node_id, "actions": await recovery.resolve_once(own_immediately=True)}
 
 
 # ----------------------------------------------------------------------------- live [T6]

@@ -3,7 +3,7 @@ COMPOSE := docker compose
 TOOLS   := $(COMPOSE) run --rm tools
 
 
-.PHONY: help build redeploy up down clean ps logs status check seed check-live load demo-lb demo-replication
+.PHONY: help build redeploy up down clean ps logs status check seed check-live load demo-lb demo-replication check-invariants demo-dtx test
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -56,3 +56,12 @@ demo-lb:         ## [T6] load balancing: distribution, node kill + redistributio
 
 demo-replication: ## [T1] replication: propagation, sync vs async, read-your-writes, sync cost
 	$(TOOLS) python -m demo.demo_replication
+
+check-invariants: ## [T4] prove money is conserved and both shards agree
+	$(TOOLS) python -m demo.invariants
+
+demo-dtx:        ## [T4] 2PC: normal, insufficient funds, failure between PREPARE/COMMIT, 100 concurrent bids
+	$(TOOLS) python -m demo.demo_dtx
+
+test:            ## pytest: unit + integration (RESETS demo data first)
+	$(TOOLS) python -m pytest -q $(ARGS)

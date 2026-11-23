@@ -12,7 +12,8 @@ import asyncpg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import closer
+from . import recovery
+from .closer import Closer
 from .api import router
 from .config import settings
 from .errors import AppError
@@ -46,7 +47,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         asyncio.create_task(rt.shard_a.run(settings.topology_interval)),
         asyncio.create_task(rt.shard_b.run(settings.topology_interval)),
         asyncio.create_task(rt.hub.run()),
-        asyncio.create_task(closer.run()),
+        asyncio.create_task(Closer().run()),
+        asyncio.create_task(recovery.run()),  # [T5] startup + periodic in-doubt resolution
     ]
     log.info("node %s started; A leader=%s B leader=%s", settings.node_id,
              rt.shard_a.leader_name, rt.shard_b.leader_name)
