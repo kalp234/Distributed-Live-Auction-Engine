@@ -2,7 +2,7 @@
 COMPOSE := docker compose
 TOOLS   := $(COMPOSE) run --rm tools
 
-.PHONY: help build up down clean ps logs status check seed
+.PHONY: help build up down clean ps logs status check seed check-live load demo-lb
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -41,3 +41,9 @@ seed:            ## seed data if empty (RESET=1 to wipe and reseed)
 
 check-live:      ## WebSocket clients on every node receive a bid placed via one node
 	$(TOOLS) python -m demo.check_live app2
+
+load:            ## run the load generator (DURATION=20 READERS=6 BIDDERS=3)
+	$(TOOLS) python -m demo.loadgen --duration $(or $(DURATION),20) --readers $(or $(READERS),6) --bidders $(or $(BIDDERS),3)
+
+demo-lb:         ## [T6] load balancing: distribution, node kill + redistribution, WS fan-out
+	$(TOOLS) python -m demo.demo_lb
